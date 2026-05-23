@@ -30,7 +30,8 @@ Route::middleware(['web', 'auth', 'admin'])->group(function () {
         $service = ai_member_service();
         return view('ai_member::admin.settings', [
             'config' => $service->getConfig(),
-            'botUser' => $service->getBotUser()
+            'botUser' => $service->getBotUser(),
+            'pendingTasks' => $service->getPendingTasks()
         ]);
     })->name('admin.ai-member.index');
 
@@ -43,6 +44,25 @@ Route::middleware(['web', 'auth', 'admin'])->group(function () {
 
         return redirect()->back()->with('success', __('ai_member::messages.success_save'));
     })->name('admin.ai-member.save');
+
+    Route::post('/admin/ai-member/cancel-task', function (Request $request) {
+        $service = ai_member_service();
+        $success = $service->cancelTask($request->input('task_key'));
+        return response()->json(['success' => $success]);
+    })->name('admin.ai-member.cancel-task');
+
+    Route::post('/admin/ai-member/execute-task', function (Request $request) {
+        $service = ai_member_service();
+        try {
+            $success = $service->executeTask($request->input('task_key'));
+            if ($success) {
+                return response()->json(['success' => true, 'message' => __('ai_member::messages.task_execute_success')]);
+            }
+            return response()->json(['success' => false, 'message' => __('ai_member::messages.task_execute_failed')]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()]);
+        }
+    })->name('admin.ai-member.execute-task');
 });
 
 // Member API Route (The Background Tick)

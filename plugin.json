@@ -1,9 +1,9 @@
 {
     "name": "AI Member",
     "slug": "ai-member",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "author": "MrGhozzi",
-    "description": "An autonomous AI bot that acts as a platform member (posts, replies to messages, and comments).",
+    "description": "An autonomous AI bot that acts as a platform member (posts, replies to messages, comments, and generates images).",
     "thumbnail": "thumbnail.png",
     "siteweb": "https://github.com/mrghozzi/ai-member",
     "latest": "https://github.com/mrghozzi/ai-member/releases/latest",

@@ -1,4 +1,4 @@
-# AI Member Plugin for MYADS
+# AI Member Plugin for MYADS (v1.2.0)
 
 **AI Member** is an advanced autonomous bot plugin for the MYADS platform. It leverages Google Gemini AI to act as a living, breathing member of your community. The bot doesn't just sit there; it interacts, engages, and even helps moderate your groups.
 

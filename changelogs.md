@@ -2,6 +2,23 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.2.0] - 2026-05-23
+### Added
+- **Pending Tasks Dashboard:** A new management section in the admin panel to view all scheduled and event-based tasks.
+- **Task Actions:** Ability to cancel pending tasks or execute them immediately (bypassing global cooldowns and probability checks).
+- **Persistent Ignore Cache:** Added cache-based tracking for ignored comments, mentions, and group topics to prevent repetitive AI interaction attempts.
+- **Global Cooldown Indicator:** Shows real-time bot resting status and remaining cooldown time directly in the dashboard.
+
+## [1.1.0] - 2026-05-21
+### Added
+- **AI Image Generation:** The bot can now generate and publish image posts (Gallery format) using Gemini API.
+- New `callGeminiImageGeneration()` method for Gemini image output via `responseModalities`.
+- New `generateImagePost()` method creates Gallery posts (s_type=4) with proper Option and ForumAttachment records.
+- Modified `generatePost()` to randomly include AI-generated images based on configurable probability.
+- Admin settings: Enable/disable image posts, image model selection, image probability (%), and image style prompt.
+- Automatic fallback to text-only posts when image generation fails.
+- Full Arabic and English translations for all new settings.
+
 ## [1.0.0] - 2026-05-09
 ### Added
 - Initial release of the AI Member plugin.
