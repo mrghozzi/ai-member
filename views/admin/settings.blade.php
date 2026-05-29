@@ -120,12 +120,20 @@
                             </label>
                         </div>
                     </div>
-                    <div class="mb-4">
                         <div class="form-check">
                             <input class="form-check-input" type="checkbox" name="enable_reactions" id="enable_reactions" value="1" {{ !empty($config['enable_reactions']) ? 'checked' : '' }}>
                             <label class="form-check-label fw-bold" for="enable_reactions">
                                 {{ __('ai_member::messages.enable_reactions_label') }}
                             </label>
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="enable_auto_block" id="enable_auto_block" value="1" {{ !empty($config['enable_auto_block']) ? 'checked' : '' }}>
+                            <label class="form-check-label fw-bold" for="enable_auto_block">
+                                {{ __('ai_member::messages.enable_auto_block_label') }}
+                            </label>
+                            <div class="text-muted small">{{ __('ai_member::messages.enable_auto_block_help') }}</div>
                         </div>
                     </div>
 

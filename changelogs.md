@@ -2,6 +2,10 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.3.0] - 2026-05-29
+### Added
+- **Auto-Block Feature:** The bot can now automatically detect abusive or harassing messages, mentions, and comments and issue platform or message-level blocks using the `[CMD_BLOCK: duration]` system prompt.
+
 ## [1.2.0] - 2026-05-23
 ### Added
 - **Pending Tasks Dashboard:** A new management section in the admin panel to view all scheduled and event-based tasks.

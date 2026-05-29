@@ -32,6 +32,8 @@ return [
     'enable_messages_label' => 'Auto-Reply to Private Messages',
     'enable_comments_label' => 'Auto-Reply to Comments on its posts',
     'enable_reactions_label' => 'Auto-React to other members\' posts',
+    'enable_auto_block_label' => 'Enable Auto-Block for Abusive Users',
+    'enable_auto_block_help' => 'When enabled, the bot can detect abusive or harassing messages and automatically block the user.',
     'save_settings' => 'Save & Sync Bot User',
     'success_save' => 'AI Member settings saved and user synced successfully.',
     'sidebar_menu' => 'AI Member',

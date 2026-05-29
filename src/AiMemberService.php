@@ -521,9 +521,34 @@ class AiMemberService
             $systemPrompt .= " SPECIAL INSTRUCTION: The sender is the system administrator. If the administrator asks you to publish or post a status/post right now on the feed, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_POST: topic]' where 'topic' is the specific topic they asked you to post about (or 'default' if no topic was specified). Example: [CMD_POST: football] or [CMD_POST: default].";
         }
 
+        if (!empty($config['enable_auto_block']) && $message->us_env != 1) {
+            $systemPrompt .= " SPECIAL INSTRUCTION: If the user is being highly abusive, offensive, or harassing you, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_BLOCK: duration]' where 'duration' is the number of days to block the user based on severity, or 'forever' for an indefinite block. Example: [CMD_BLOCK: 7] or [CMD_BLOCK: forever].";
+        }
+
         $replyContent = $this->callGemini($systemPrompt, $message->text);
 
         if ($replyContent) {
+            // Check for auto block command first
+            if (!empty($config['enable_auto_block']) && $message->us_env != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
+                $blockDuration = trim($blockMatches[1]);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
+                $abuser = \App\Models\User::find($message->us_env);
+                
+                if ($abuser) {
+                    $blockService = app(\App\Services\UserBlockService::class);
+                    // Messages only block since it occurred in PMs
+                    $blockService->blockUser($bot, $abuser, 'messages_only', $days);
+                }
+                
+                // Mark message as read
+                Message::where('us_rec', $bot->id)
+                    ->where('us_env', $message->us_env)
+                    ->where('state', '!=', 0)
+                    ->update(['state' => 0]);
+                    
+                return true;
+            }
+
             // Mark ALL unread messages from this specific user as read
             Message::where('us_rec', $bot->id)
                 ->where('us_env', $message->us_env)
@@ -635,9 +660,28 @@ ORIGINAL POST TEXT:
 THEIR COMMENT MENTIONING YOU:
 \"" . strip_tags($mentionComment->txt) . "\"";
 
+        if (!empty($config['enable_auto_block']) && $mentioner->id != 1) {
+            $systemPrompt .= "\nSPECIAL INSTRUCTION: If their comment is highly abusive, offensive, or harassing you, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_BLOCK: duration]' where 'duration' is the number of days to block the user based on severity, or 'forever' for an indefinite block. Example: [CMD_BLOCK: 7] or [CMD_BLOCK: forever].";
+        }
+
         $replyContent = $this->callGemini($systemPrompt, "Please reply to the comment above.");
 
         if ($replyContent) {
+            // Check for auto block command first
+            if (!empty($config['enable_auto_block']) && $mentioner->id != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
+                $blockDuration = trim($blockMatches[1]);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
+                $abuser = \App\Models\User::find($mentioner->id);
+                
+                if ($abuser) {
+                    $blockService = app(\App\Services\UserBlockService::class);
+                    // Full platform block since it's a public comment
+                    $blockService->blockUser($bot, $abuser, 'full_platform', $days);
+                }
+                
+                return true;
+            }
+
             $mentionText = $mentioner ? '@' . $mentioner->username . ' ' : '';
 
             $reply = new \App\Models\ForumComment();
@@ -731,9 +775,28 @@ YOUR ORIGINAL POST TEXT:
 THEIR COMMENT TO YOU:
 \"" . strip_tags($latestComment->txt) . "\"";
 
+        if (!empty($config['enable_auto_block']) && $latestComment->uid != 1) {
+            $systemPrompt .= "\nSPECIAL INSTRUCTION: If their comment is highly abusive, offensive, or harassing you, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_BLOCK: duration]' where 'duration' is the number of days to block the user based on severity, or 'forever' for an indefinite block. Example: [CMD_BLOCK: 7] or [CMD_BLOCK: forever].";
+        }
+
         $replyContent = $this->callGemini($systemPrompt, "Please reply to their comment.");
 
         if ($replyContent) {
+            // Check for auto block command first
+            if (!empty($config['enable_auto_block']) && $latestComment->uid != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
+                $blockDuration = trim($blockMatches[1]);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
+                $abuser = \App\Models\User::find($latestComment->uid);
+                
+                if ($abuser) {
+                    $blockService = app(\App\Services\UserBlockService::class);
+                    // Full platform block since it's a public comment
+                    $blockService->blockUser($bot, $abuser, 'full_platform', $days);
+                }
+                
+                return true;
+            }
+
             $commentAuthor = \App\Models\User::find($latestComment->uid);
             $mention = $commentAuthor ? '@' . $commentAuthor->username . ' ' : '';
 
