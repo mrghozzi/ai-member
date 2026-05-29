@@ -83,6 +83,7 @@ return [
     'task_details' => 'Details',
     'task_actions' => 'Actions',
     'task_cancel' => 'Cancel',
+    'task_cancel_confirm' => 'Are you sure you want to cancel this task?',
     'task_execute' => 'Execute Now',
     'task_execute_success' => 'Task executed successfully!',
     'task_execute_failed' => 'Failed to execute task.',

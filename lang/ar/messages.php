@@ -83,6 +83,7 @@ return [
     'task_details' => 'التفاصيل',
     'task_actions' => 'الإجراءات',
     'task_cancel' => 'إلغاء',
+    'task_cancel_confirm' => 'هل أنت متأكد من إلغاء هذه المهمة؟',
     'task_execute' => 'تنفيذ الآن',
     'task_execute_success' => 'تم تنفيذ المهمة بنجاح!',
     'task_execute_failed' => 'فشل تنفيذ المهمة.',
