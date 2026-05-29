@@ -6,6 +6,9 @@ All notable changes to this plugin will be documented in this file.
 ### Added
 - **Auto-Block Feature:** The bot can now automatically detect abusive or harassing messages, mentions, and comments and issue platform or message-level blocks using the `[CMD_BLOCK: duration]` system prompt.
 
+### Changed
+- **Superdesign:** Completely redesigned the plugin's admin settings page (`/admin/ai-member`) to adopt the premium Duralux "Superdesign" aesthetic, featuring glassmorphism, responsive grids, and modern UI components.
+
 ## [1.2.0] - 2026-05-23
 ### Added
 - **Pending Tasks Dashboard:** A new management section in the admin panel to view all scheduled and event-based tasks.
