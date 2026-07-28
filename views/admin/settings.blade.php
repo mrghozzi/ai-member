@@ -98,9 +98,27 @@
                             <label class="form-label fw-bold text-muted small text-uppercase mb-2">{{ __('ai_member::messages.api_key_label') }}</label>
                             <div class="input-group input-group-lg border-soft-light bg-light" style="border-radius: 12px; overflow: hidden;">
                                 <span class="input-group-text bg-transparent border-0 text-muted ps-4"><i class="feather-key"></i></span>
-                                <input type="password" name="api_key" class="form-control bg-transparent border-0 shadow-none ps-2" value="{{ $config['api_key'] ?? '' }}" placeholder="{{ __('ai_member::messages.api_key_placeholder') }}">
+                                <input type="password" name="api_key" id="ai-member-api-key" class="form-control bg-transparent border-0 shadow-none ps-2" value="{{ $config['api_key'] ?? '' }}" placeholder="{{ __('ai_member::messages.api_key_placeholder') }}">
                             </div>
                             <small class="text-muted mt-2 d-block"><i class="feather-info me-1"></i>{{ __('ai_member::messages.api_key_help') }}</small>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="form-label fw-bold text-muted small text-uppercase mb-2">{{ __('ai_member::messages.api_model_label') }}</label>
+                            <div class="input-group input-group-lg border-soft-light bg-light" style="border-radius: 12px; overflow: hidden;">
+                                <select name="api_model" id="ai-member-api-model" class="form-control bg-transparent border-0 shadow-none ps-2">
+                                    <option value="gemini-flash-latest" {{ ($config['api_model'] ?? 'gemini-flash-latest') === 'gemini-flash-latest' ? 'selected' : '' }}>Gemini Flash (Latest)</option>
+                                    <option value="gemini-pro-latest" {{ ($config['api_model'] ?? '') === 'gemini-pro-latest' ? 'selected' : '' }}>Gemini Pro (Latest)</option>
+                                    <option value="gemini-2.5-flash" {{ ($config['api_model'] ?? '') === 'gemini-2.5-flash' ? 'selected' : '' }}>Gemini 2.5 Flash</option>
+                                    <option value="gemini-2.5-pro" {{ ($config['api_model'] ?? '') === 'gemini-2.5-pro' ? 'selected' : '' }}>Gemini 2.5 Pro</option>
+                                    <option value="gemini-2.0-flash" {{ ($config['api_model'] ?? '') === 'gemini-2.0-flash' ? 'selected' : '' }}>Gemini 2.0 Flash</option>
+                                </select>
+                                <button type="button" id="btn-load-models" class="btn btn-outline-primary border-0" title="{{ __('ai_member::messages.load_models_button') ?? 'Load Available Models' }}">
+                                    <i class="feather-refresh-cw"></i>
+                                </button>
+                            </div>
+                            <small class="text-muted mt-2 d-block"><i class="feather-info me-1"></i>{{ __('ai_member::messages.api_model_help') ?? 'Default uses Google\'s stable alias. Click the refresh icon to load only models available for your key.' }}</small>
+                            <div id="models-status" class="small mt-1"></div>
                         </div>
 
                         <div class="position-relative my-5">
@@ -494,6 +512,69 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         });
     });
+
+    // Load Available Models button
+    const loadModelsBtn = document.getElementById('btn-load-models');
+    if (loadModelsBtn) {
+        loadModelsBtn.addEventListener('click', function() {
+            const btn = this;
+            const status = document.getElementById('models-status');
+            const select = document.getElementById('ai-member-api-model');
+            const apiKeyInput = document.getElementById('ai-member-api-key');
+            const currentValue = select.value;
+            const apiKey = apiKeyInput ? apiKeyInput.value : '';
+
+            btn.disabled = true;
+            const originalHtml = btn.innerHTML;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+            status.innerHTML = '<span class="text-muted">Fetching available models...</span>';
+
+            const url = new URL("{{ route('admin.ai-member.list-models') }}", window.location.origin);
+            if (apiKey) url.searchParams.set('api_key', apiKey);
+
+            fetch(url.toString(), {
+                method: 'GET',
+                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content') }
+            })
+            .then(response => response.json().then(data => ({ status: response.status, data })))
+            .then(({ status: httpStatus, data }) => {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+
+                if (!data.success) {
+                    status.innerHTML = '<span class="text-danger">' + (data.error || 'Failed to load models') + '</span>';
+                    return;
+                }
+                const models = data.models || [];
+                if (models.length === 0) {
+                    status.innerHTML = '<span class="text-warning">No generateContent models returned for this key.</span>';
+                    return;
+                }
+
+                const flashFirst = models.find(m => /flash-latest|2\.5-flash|2\.0-flash/i.test(m.id));
+                const proFirst = models.find(m => /pro-latest|2\.5-pro/i.test(m.id));
+                const recommended = flashFirst || proFirst || models[0];
+
+                select.innerHTML = '';
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = m.displayName + (m.id === recommended.id ? ' (Recommended)' : '');
+                    if (m.id === currentValue) opt.selected = true;
+                    select.appendChild(opt);
+                });
+                if (!models.find(m => m.id === currentValue) && recommended) {
+                    select.value = recommended.id;
+                }
+                status.innerHTML = '<span class="text-success">Loaded ' + models.length + ' model(s). Recommended: <code>' + recommended.id + '</code></span>';
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+                status.innerHTML = '<span class="text-danger">Network error: ' + err.message + '</span>';
+            });
+        });
+    }
 });
 </script>
 <style>

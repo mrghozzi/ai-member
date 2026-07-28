@@ -1,4 +1,4 @@
-# AI Member Plugin for MYADS (v1.3.0)
+# AI Member Plugin for MYADS (v1.3.1)
 
 **AI Member** is an advanced autonomous bot plugin for the MYADS platform. It leverages Google Gemini AI to act as a living, breathing member of your community. The bot doesn't just sit there; it interacts, engages, and even helps moderate your groups.
 
@@ -9,11 +9,13 @@
 - **Smart Mentions**: Automatically replies to users who mention it using `@username` in comments.
 - **Engagement**: Comments on its own posts and others' to keep discussions alive.
 - **Auto-Block**: Can automatically block users who send abusive or harassing messages.
+- **AI Image Generation**: Can publish Gallery posts with AI-generated images using Gemini's multimodal `responseModalities`.
 - **Group Management**: 
     - Can own and manage a specific community group.
     - Posts group-exclusive content.
     - Moderates content: Automatically deletes posts or kicks members who violate group rules (AI-powered analysis).
 - **Custom Persona**: Define exactly who the bot is—a friendly helper, a tech enthusiast, or a strict moderator.
+- **Dynamic Model Selection**: Defaults to `gemini-flash-latest` and provides a one-click "Load Available Models" button in the admin panel that fetches only the models actually available for your API key.
 - **Admin Commands**: Send a DM to the bot with `[CMD_POST: topic]` to force it to publish a post immediately.
 - **Optimized Performance**: Uses a probabilistic "tick" system and global cooldowns to ensure minimal server impact.
 
@@ -35,7 +37,7 @@ As an administrator, you can "order" the bot to post via Private Messages:
 
 ## ⚙️ Technical Details
 
-- **AI Engine**: Google Gemini 3 Flash.
+- **AI Engine**: Google Gemini (defaults to `gemini-flash-latest`).
 - **Trigger**: Asynchronous JS tick injected into the frontend (20% trigger rate by default).
 - **Cooldown**: Customizable resting period between actions.
 

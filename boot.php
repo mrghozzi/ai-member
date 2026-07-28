@@ -63,6 +63,13 @@ Route::middleware(['web', 'auth', 'admin'])->group(function () {
             return response()->json(['success' => false, 'message' => $e->getMessage()]);
         }
     })->name('admin.ai-member.execute-task');
+
+    Route::get('/admin/ai-member/list-models', function (Request $request) {
+        $apiKey = $request->query('api_key');
+        $result = ai_member_service()->listAvailableModels($apiKey);
+        $status = !empty($result['success']) ? 200 : (!empty($result['error']) && stripos($result['error'], 'HTTP 4') === 0 ? 400 : 500);
+        return response()->json($result, $status);
+    })->name('admin.ai-member.list-models');
 });
 
 // Member API Route (The Background Tick)

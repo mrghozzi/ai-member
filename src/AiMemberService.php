@@ -16,7 +16,7 @@ use Illuminate\Support\Str;
 
 class AiMemberService
 {
-    private $model = 'gemini-3-flash-preview';
+    private $model = 'gemini-flash-latest';
     private $botUserIdOption = 'ai_member_bot_uid';
     private $configOption = 'ai_member_config';
 
@@ -41,6 +41,51 @@ class AiMemberService
     {
         $config = $this->getConfig();
         return !empty($config['is_enabled']) && !empty($config['api_key']);
+    }
+
+    public function listAvailableModels($apiKey = null)
+    {
+        if (!$apiKey) {
+            $config = $this->getConfig();
+            $apiKey = $config['api_key'] ?? null;
+        }
+        if (!$apiKey) {
+            return ['success' => false, 'error' => 'API key is required.'];
+        }
+        try {
+            $response = Http::get("https://generativelanguage.googleapis.com/v1beta/models?key={$apiKey}");
+            if (!$response->successful()) {
+                return [
+                    'success' => false,
+                    'error' => 'Google API returned HTTP ' . $response->status() . ': ' . $response->body(),
+                ];
+            }
+            $data = $response->json();
+            $models = [];
+            if (isset($data['models']) && is_array($data['models'])) {
+                foreach ($data['models'] as $model) {
+                    $name = $model['name'] ?? '';
+                    $name = str_replace('models/', '', $name);
+                    $methods = $model['supportedGenerationMethods'] ?? [];
+                    if (!in_array('generateContent', $methods)) continue;
+                    if (stripos($name, 'embedding') !== false) continue;
+                    if (stripos($name, 'aqa') !== false) continue;
+                    if (stripos($name, 'imagen') !== false) continue;
+                    if (stripos($name, 'veo') !== false) continue;
+                    $displayName = $model['displayName'] ?? $name;
+                    $models[] = [
+                        'id' => $name,
+                        'displayName' => $displayName,
+                    ];
+                }
+            }
+            usort($models, function ($a, $b) {
+                return strcmp($a['id'], $b['id']);
+            });
+            return ['success' => true, 'models' => $models];
+        } catch (\Exception $e) {
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
     }
 
     public function syncBotUser($data)
@@ -124,18 +169,33 @@ class AiMemberService
     {
         $config = $this->getConfig();
         $apiKey = $config['api_key'] ?? null;
+        $model = $config['api_model'] ?? $this->model;
 
         if (!$apiKey)
             return null;
 
         try {
-            $response = Http::post("https://generativelanguage.googleapis.com/v1beta/models/{$this->model}:generateContent?key={$apiKey}", [
+            $response = Http::withHeaders([
+                'Content-Type' => 'application/json',
+            ])->post("https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}", [
+                'systemInstruction' => [
+                    'parts' => [
+                        ['text' => $systemPrompt]
+                    ]
+                ],
                 'contents' => [
                     [
+                        'role' => 'user',
                         'parts' => [
-                            ['text' => $systemPrompt . "\n\nUser Input: " . $userPrompt]
+                            ['text' => $userPrompt]
                         ]
                     ]
+                ],
+                'generationConfig' => [
+                    'temperature' => 0.7,
+                    'topP' => 0.95,
+                    'topK' => 40,
+                    'maxOutputTokens' => 1024,
                 ],
             ]);
 
@@ -145,8 +205,9 @@ class AiMemberService
                     $text = $data['candidates'][0]['content']['parts'][0]['text'];
                     return trim($text);
                 }
+                Log::warning('AI Member API: Unexpected response structure', ['response' => $data]);
             } else {
-                Log::error('AI Member API Error: ' . $response->body());
+                Log::error('AI Member API HTTP ' . $response->status() . ': ' . $response->body());
             }
         } catch (\Exception $e) {
             Log::error('AI Member Exception: ' . $e->getMessage());
