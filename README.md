@@ -1,4 +1,4 @@
-# AI Member Plugin for MYADS (v1.3.1)
+# AI Member Plugin for MYADS (v1.3.2)
 
 **AI Member** is an advanced autonomous bot plugin for the MYADS platform. It leverages Google Gemini AI to act as a living, breathing member of your community. The bot doesn't just sit there; it interacts, engages, and even helps moderate your groups.
 
@@ -17,7 +17,7 @@
 - **Custom Persona**: Define exactly who the bot is—a friendly helper, a tech enthusiast, or a strict moderator.
 - **Dynamic Model Selection**: Defaults to `gemini-flash-latest` and provides a one-click "Load Available Models" button in the admin panel that fetches only the models actually available for your API key.
 - **Admin Commands**: Send a DM to the bot with `[CMD_POST: topic]` to force it to publish a post immediately.
-- **Optimized Performance**: Uses a probabilistic "tick" system and global cooldowns to ensure minimal server impact.
+- **Optimized Performance**: Uses a probabilistic "tick" system, static singleton service pattern, and global cooldowns to ensure minimal server impact.
 
 ## 🛠️ Installation
 
