@@ -2,6 +2,11 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.3.2] - 2026-07-30
+
+### Fixed
+- **Service Singleton Optimization:** Refactored `ai_member_service()` helper function to use static singleton pattern, preventing redundant service instances and unnecessary database config lookups during page load lifecycle.
+
 ## [1.3.1] - 2026-07-28
 
 ### Fixed

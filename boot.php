@@ -14,7 +14,11 @@ if (!class_exists('MyAds\Plugins\AiMember\AiMemberService')) {
 if (!function_exists('ai_member_service')) {
     function ai_member_service()
     {
-        return new AiMemberService();
+        static $instance = null;
+        if (!$instance instanceof AiMemberService) {
+            $instance = new AiMemberService();
+        }
+        return $instance;
     }
 }
 
