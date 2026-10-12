@@ -7,8 +7,16 @@ use App\Models\User;
 use App\Models\Status;
 use App\Models\Message;
 use App\Models\ForumComment;
+use App\Models\ForumTopic;
 use App\Models\Like;
 use App\Models\ForumAttachment;
+use App\Models\StatusMention;
+use App\Models\Group;
+use App\Models\GroupMembership;
+use App\Models\UserPrivacySetting;
+use App\Services\NotificationService;
+use App\Services\MentionService;
+use App\Services\UserBlockService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -16,50 +24,81 @@ use Illuminate\Support\Str;
 
 class AiMemberService
 {
-    private $model = 'gemini-flash-latest';
-    private $botUserIdOption = 'ai_member_bot_uid';
-    private $configOption = 'ai_member_config';
+    private string $model = 'gemini-flash-latest';
+    private string $botUserIdOption = 'ai_member_bot_uid';
+    private string $configOption = 'ai_member_config';
+    private string $activityLogsOption = 'ai_member_activity_logs';
+    private string $ignoredTasksOption = 'ai_member_ignored_tasks';
 
-    public function getConfig()
+    /**
+     * Retrieve the stored configuration array.
+     */
+    public function getConfig(): array
     {
         $option = Option::where('name', $this->configOption)->first();
-        return $option ? json_decode($option->o_valuer, true) : [];
+        return $option ? (json_decode($option->o_valuer, true) ?: []) : [];
     }
 
-    public function saveConfig($data)
+    /**
+     * Persist the configuration array, normalizing checkbox values.
+     */
+    public function saveConfig(array $data): void
     {
+        $checkboxes = [
+            'is_enabled',
+            'enable_messages',
+            'enable_comments',
+            'enable_reactions',
+            'enable_auto_block',
+            'enable_image_posts',
+            'enable_group_moderation',
+        ];
+
+        foreach ($checkboxes as $cb) {
+            $data[$cb] = !empty($data[$cb]) ? 1 : 0;
+        }
+
         Option::updateOrCreate(
             ['name' => $this->configOption],
             [
                 'o_valuer' => json_encode($data),
-                'o_type' => 'ai_member'
+                'o_type' => 'ai_member',
             ]
         );
     }
 
-    public function isEnabled()
+    /**
+     * Check whether the AI Member is globally enabled with a configured API key.
+     */
+    public function isEnabled(): bool
     {
         $config = $this->getConfig();
         return !empty($config['is_enabled']) && !empty($config['api_key']);
     }
 
-    public function listAvailableModels($apiKey = null)
+    /**
+     * Fetch list of available text-generation models from Google Gemini API.
+     */
+    public function listAvailableModels(?string $apiKey = null): array
     {
         if (!$apiKey) {
             $config = $this->getConfig();
             $apiKey = $config['api_key'] ?? null;
         }
+
         if (!$apiKey) {
             return ['success' => false, 'error' => 'API key is required.'];
         }
+
         try {
-            $response = Http::get("https://generativelanguage.googleapis.com/v1beta/models?key={$apiKey}");
+            $response = Http::timeout(15)->get("https://generativelanguage.googleapis.com/v1beta/models?key={$apiKey}");
             if (!$response->successful()) {
                 return [
                     'success' => false,
                     'error' => 'Google API returned HTTP ' . $response->status() . ': ' . $response->body(),
                 ];
             }
+
             $data = $response->json();
             $models = [];
             if (isset($data['models']) && is_array($data['models'])) {
@@ -67,11 +106,20 @@ class AiMemberService
                     $name = $model['name'] ?? '';
                     $name = str_replace('models/', '', $name);
                     $methods = $model['supportedGenerationMethods'] ?? [];
-                    if (!in_array('generateContent', $methods)) continue;
-                    if (stripos($name, 'embedding') !== false) continue;
-                    if (stripos($name, 'aqa') !== false) continue;
-                    if (stripos($name, 'imagen') !== false) continue;
-                    if (stripos($name, 'veo') !== false) continue;
+
+                    if (!in_array('generateContent', $methods, true)) {
+                        continue;
+                    }
+
+                    if (
+                        stripos($name, 'embedding') !== false ||
+                        stripos($name, 'aqa') !== false ||
+                        stripos($name, 'imagen') !== false ||
+                        stripos($name, 'veo') !== false
+                    ) {
+                        continue;
+                    }
+
                     $displayName = $model['displayName'] ?? $name;
                     $models[] = [
                         'id' => $name,
@@ -79,16 +127,73 @@ class AiMemberService
                     ];
                 }
             }
-            usort($models, function ($a, $b) {
+
+            usort($models, static function ($a, $b) {
                 return strcmp($a['id'], $b['id']);
             });
+
             return ['success' => true, 'models' => $models];
         } catch (\Exception $e) {
             return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 
-    public function syncBotUser($data)
+    /**
+     * Test Gemini AI connectivity and latency with a custom or default prompt.
+     */
+    public function testAi(string $prompt = 'Hello! Tell me a short, inspiring one-sentence thought.'): array
+    {
+        $config = $this->getConfig();
+        $apiKey = $config['api_key'] ?? null;
+        $model = $config['api_model'] ?? $this->model;
+
+        if (!$apiKey) {
+            return [
+                'success' => false,
+                'response' => 'Gemini API key is not configured.',
+                'model' => $model,
+                'latency_ms' => 0,
+            ];
+        }
+
+        $startTime = microtime(true);
+
+        try {
+            $systemPrompt = "You are testing the AI Member integration for the MyAds platform. Keep your answer brief, witty, and under 250 characters.";
+            $response = $this->callGemini($systemPrompt, $prompt);
+            $latencyMs = (int) round((microtime(true) - $startTime) * 1000);
+
+            if ($response !== null && $response !== '') {
+                $this->logActivity('test_ai', 'Successfully tested model: ' . $model . ' (' . $latencyMs . 'ms)', 'success');
+                return [
+                    'success' => true,
+                    'response' => $response,
+                    'model' => $model,
+                    'latency_ms' => $latencyMs,
+                ];
+            }
+
+            return [
+                'success' => false,
+                'response' => 'No response returned from Gemini API. Check your API key and quota in Google AI Studio.',
+                'model' => $model,
+                'latency_ms' => $latencyMs,
+            ];
+        } catch (\Exception $e) {
+            $latencyMs = (int) round((microtime(true) - $startTime) * 1000);
+            return [
+                'success' => false,
+                'response' => $e->getMessage(),
+                'model' => $model,
+                'latency_ms' => $latencyMs,
+            ];
+        }
+    }
+
+    /**
+     * Synchronize or create the bot User account in accordance with v4.6.x 3-tier privacy standards.
+     */
+    public function syncBotUser(array $data = []): ?User
     {
         $uidOption = Option::where('name', $this->botUserIdOption)->first();
         $user = null;
@@ -98,28 +203,40 @@ class AiMemberService
         }
 
         if (!$user) {
-            // Need to generate a unique email and fake password
             $email = 'ai_bot_' . time() . '@myads.local';
             $user = new User();
             $user->email = $email;
-            $user->pass = bcrypt(\Illuminate\Support\Str::random(16));
+            $user->pass = bcrypt(Str::random(24));
             $user->ucheck = 1; // Verified badge
             $user->public_uid = User::generatePublicUid();
-            $user->pts = 10;
+            $user->email_verified_at = now();
+            $user->pts = 100;
             $user->vu = 10;
             $user->nvu = 10;
             $user->nlink = 10;
             $user->nsmart = 10;
         }
 
-        $user->username = $data['bot_name'] ?? 'AI Member';
-        $user->img = $data['bot_avatar'] ?? asset('upload/avatar.png');
+        if (empty($user->public_uid)) {
+            $user->public_uid = User::generatePublicUid();
+        }
+
+        $config = $this->getConfig();
+        $botName = !empty($data['bot_name']) ? $data['bot_name'] : ($config['bot_name'] ?? 'AI Member');
+        $botUsername = !empty($data['bot_username']) ? $data['bot_username'] : ($config['bot_username'] ?? 'ai_member');
+        $botAvatar = !empty($data['bot_avatar']) ? $data['bot_avatar'] : ($config['bot_avatar'] ?? asset('upload/avatar.png'));
+
+        $user->username = $botName;
+        $user->name = $botUsername;
+        $user->img = $botAvatar;
+        $user->ucheck = 1;
         $user->online = time();
 
-        // Generate Bio if API key is present
-        if (!empty($data['api_key'])) {
-            $bioSystemPrompt = "You are writing your own profile bio. Based on your persona, write a short 'About Me' bio (max 200 characters). Do not use markdown. Speak in the first person.";
-            $bio = $this->callGemini($bioSystemPrompt, "My persona is: " . ($data['persona_prompt'] ?? 'I am a friendly AI member.'));
+        // Generate Bio if API key is present and bio is empty
+        $apiKey = $data['api_key'] ?? ($config['api_key'] ?? null);
+        if (!empty($apiKey) && empty($user->sig)) {
+            $bioSystemPrompt = "You are writing your own profile bio. Based on your persona, write a short 'About Me' bio (max 180 characters). Do not use markdown. Speak in the first person.";
+            $bio = $this->callGemini($bioSystemPrompt, "My persona is: " . ($data['persona_prompt'] ?? ($config['persona_prompt'] ?? 'I am a friendly AI member.')));
             if ($bio) {
                 $user->sig = $bio;
             }
@@ -131,32 +248,59 @@ class AiMemberService
             Option::create([
                 'name' => $this->botUserIdOption,
                 'o_valuer' => $user->id,
-                'o_type' => 'ai_member'
+                'o_type' => 'ai_member',
             ]);
         }
 
+        // Align with MyAds v4.6.x 3-tier privacy model
+        if (class_exists(UserPrivacySetting::class)) {
+            try {
+                UserPrivacySetting::updateOrCreate(
+                    ['user_id' => $user->id],
+                    [
+                        'profile_visibility' => 'public',
+                        'about_visibility' => 'public',
+                        'photos_visibility' => 'public',
+                        'followers_visibility' => 'public',
+                        'following_visibility' => 'public',
+                        'points_history_visibility' => 'public',
+                        'allow_direct_messages' => true,
+                        'allow_mentions' => true,
+                        'allow_reposts' => true,
+                        'show_online_status' => true,
+                    ]
+                );
+            } catch (\Exception $e) {
+                Log::warning('AI Member Privacy Sync Warning: ' . $e->getMessage());
+            }
+        }
+
         // Handle Group Management
-        if (!empty($data['managed_group_slug'])) {
-            $group = \App\Models\Group::where('slug', $data['managed_group_slug'])->first();
+        $groupSlug = $data['managed_group_slug'] ?? ($config['managed_group_slug'] ?? null);
+        if (!empty($groupSlug)) {
+            $group = Group::where('slug', $groupSlug)->first();
             if ($group) {
-                // Set Bot as Owner
                 $group->owner_id = $user->id;
                 $group->save();
 
-                // Create or update Membership
-                \App\Models\GroupMembership::updateOrCreate(
+                GroupMembership::updateOrCreate(
                     ['group_id' => $group->id, 'user_id' => $user->id],
                     [
-                        'role' => \App\Models\GroupMembership::ROLE_OWNER,
-                        'status' => \App\Models\GroupMembership::STATUS_ACTIVE,
+                        'role' => GroupMembership::ROLE_OWNER,
+                        'status' => GroupMembership::STATUS_ACTIVE,
                         'approved_at' => now(),
                     ]
                 );
             }
         }
+
+        return $user;
     }
 
-    public function getBotUser()
+    /**
+     * Retrieve the bot User model.
+     */
+    public function getBotUser(): ?User
     {
         $uidOption = Option::where('name', $this->botUserIdOption)->first();
         if ($uidOption) {
@@ -165,31 +309,35 @@ class AiMemberService
         return null;
     }
 
-    private function callGemini($systemPrompt, $userPrompt)
+    /**
+     * Execute a request to Google Gemini API with systemInstruction root support.
+     */
+    public function callGemini(string $systemPrompt, string $userPrompt): ?string
     {
         $config = $this->getConfig();
         $apiKey = $config['api_key'] ?? null;
         $model = $config['api_model'] ?? $this->model;
 
-        if (!$apiKey)
+        if (!$apiKey) {
             return null;
+        }
 
         try {
-            $response = Http::withHeaders([
+            $response = Http::timeout(35)->withHeaders([
                 'Content-Type' => 'application/json',
             ])->post("https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}", [
                 'systemInstruction' => [
                     'parts' => [
-                        ['text' => $systemPrompt]
-                    ]
+                        ['text' => $systemPrompt],
+                    ],
                 ],
                 'contents' => [
                     [
                         'role' => 'user',
                         'parts' => [
-                            ['text' => $userPrompt]
-                        ]
-                    ]
+                            ['text' => $userPrompt],
+                        ],
+                    ],
                 ],
                 'generationConfig' => [
                     'temperature' => 0.7,
@@ -202,8 +350,7 @@ class AiMemberService
             if ($response->successful()) {
                 $data = $response->json();
                 if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
-                    $text = $data['candidates'][0]['content']['parts'][0]['text'];
-                    return trim($text);
+                    return trim($data['candidates'][0]['content']['parts'][0]['text']);
                 }
                 Log::warning('AI Member API: Unexpected response structure', ['response' => $data]);
             } else {
@@ -218,19 +365,17 @@ class AiMemberService
 
     /**
      * Call Gemini API with image generation capabilities.
-     * Uses responseModalities to request both TEXT and IMAGE output.
-     *
-     * @param string $imagePrompt The prompt describing the image to generate
-     * @return string|null The relative file path of the saved image, or null on failure
+     * Uses responseModalities to request IMAGE output.
      */
-    private function callGeminiImageGeneration($imagePrompt)
+    public function callGeminiImageGeneration(string $imagePrompt): ?string
     {
         $config = $this->getConfig();
         $apiKey = $config['api_key'] ?? null;
         $imageModel = $config['image_model'] ?? 'gemini-2.0-flash-exp';
 
-        if (!$apiKey)
+        if (!$apiKey) {
             return null;
+        }
 
         try {
             $response = Http::timeout(60)->post(
@@ -239,9 +384,9 @@ class AiMemberService
                     'contents' => [
                         [
                             'parts' => [
-                                ['text' => $imagePrompt]
-                            ]
-                        ]
+                                ['text' => $imagePrompt],
+                            ],
+                        ],
                     ],
                     'generationConfig' => [
                         'responseModalities' => ['TEXT', 'IMAGE'],
@@ -257,14 +402,13 @@ class AiMemberService
                     if (isset($part['inlineData']['mimeType'], $part['inlineData']['data'])) {
                         $mimeType = $part['inlineData']['mimeType'];
                         $base64Data = $part['inlineData']['data'];
-                        $imageBytes = base64_decode($base64Data);
+                        $imageBytes = base64_decode($base64Data, true);
 
                         if ($imageBytes === false) {
                             Log::error('AI Member Image: Failed to decode base64 image data.');
                             continue;
                         }
 
-                        // Determine file extension from MIME type
                         $extension = match ($mimeType) {
                             'image/png' => 'png',
                             'image/jpeg' => 'jpg',
@@ -301,140 +445,150 @@ class AiMemberService
         return null;
     }
 
-    public function runTick()
+    /**
+     * Run the automated background tick protected by atomic concurrency locking.
+     */
+    public function runTick(): array
     {
-        if (!$this->isEnabled())
+        if (!$this->isEnabled()) {
             return [];
+        }
+
+        $bot = $this->getBotUser();
+        if (!$bot) {
+            return [];
+        }
 
         $config = $this->getConfig();
-        $bot = $this->getBotUser();
-        if (!$bot)
-            return [];
 
-        // --- PERFORMANCE OPTIMIZATION: Probability Check ---
-        $probability = (int) ($config['tick_probability'] ?? 10);
-        if (rand(1, 100) > $probability) {
-            return []; // Skip execution based on probability to save server load
-        }
-
-        // --- PERFORMANCE OPTIMIZATION: Global Cooldown ---
-        $cooldownMinutes = (int) ($config['cooldown_minutes'] ?? 5);
-        $globalCooldownKey = 'ai_member_global_cooldown';
-        $lastActionTime = \Illuminate\Support\Facades\Cache::get($globalCooldownKey, 0);
-        if (time() < $lastActionTime + ($cooldownMinutes * 60)) {
-            return []; // Bot is resting
-        }
-
-        $actions = [];
-
-        // Helper to mark action done and stop execution
-        $markActionDone = function($actionName) use (&$actions, $globalCooldownKey, $bot) {
-            $actions[] = $actionName;
-            \Illuminate\Support\Facades\Cache::put($globalCooldownKey, time(), now()->addDays(30));
-            $bot->online = time();
-            $bot->save();
-        };
-
-        // 1. Check Auto-Posting
-        $postFreqHours = (int) ($config['post_frequency_hours'] ?? 0);
-        if ($postFreqHours > 0) {
-            $cacheKey = 'ai_member_last_post';
-            $lastPostTime = \Illuminate\Support\Facades\Cache::get($cacheKey, 0);
-            $nextPostTime = $lastPostTime + ($postFreqHours * 3600);
-
-            if (time() >= $nextPostTime) {
-                if ($this->generatePost($bot, $config)) {
-                    \Illuminate\Support\Facades\Cache::put($cacheKey, time(), now()->addDays(30));
-                    $markActionDone('post_created');
-                    return $actions; // STOP EXECUTING
-                }
+        // 1. Atomic Lock to prevent concurrent execution & race conditions
+        return Cache::lock('ai_member_tick_lock', 25)->get(function () use ($bot, $config) {
+            // 2. Probability Check
+            $probability = (int) ($config['tick_probability'] ?? 10);
+            if (rand(1, 100) > $probability) {
+                return [];
             }
-        }
 
-        // 2. Check Messages
-        if (!empty($config['enable_messages'])) {
-            if ($this->processMessages($bot, $config)) {
-                $markActionDone('message_replied');
-                return $actions; // STOP EXECUTING
+            // 3. Global Cooldown Check
+            $cooldownMinutes = (int) ($config['cooldown_minutes'] ?? 5);
+            $globalCooldownKey = 'ai_member_global_cooldown';
+            $lastActionTime = (int) Cache::get($globalCooldownKey, 0);
+
+            if (time() < $lastActionTime + ($cooldownMinutes * 60)) {
+                return []; // Bot is resting
             }
-        }
 
-        // 3. Check Comments and Mentions
-        if (!empty($config['enable_comments'])) {
-            if ($this->processMentions($bot, $config)) {
-                $markActionDone('mention_replied');
-                return $actions; // STOP EXECUTING
-            } elseif ($this->processComments($bot, $config)) {
-                $markActionDone('comment_replied');
-                return $actions; // STOP EXECUTING
-            }
-        }
+            $actions = [];
 
-        // 4. Random Reaction
-        if (!empty($config['enable_reactions'])) {
-            $cacheKey = 'ai_member_last_reaction';
-            $lastReactionTime = \Illuminate\Support\Facades\Cache::get($cacheKey, 0);
-            if (time() >= ($lastReactionTime + 7200)) {
-                if ($this->generateReaction($bot)) {
-                    \Illuminate\Support\Facades\Cache::put($cacheKey, time(), now()->addDays(30));
-                    $markActionDone('reaction_added');
-                    return $actions; // STOP EXECUTING
-                }
-            }
-        }
+            $markActionDone = function (string $actionName) use (&$actions, $globalCooldownKey, $bot) {
+                $actions[] = $actionName;
+                Cache::put($globalCooldownKey, time(), now()->addDays(30));
+                $bot->online = time();
+                $bot->save();
+            };
 
-        // 5. Group Management & Moderation
-        if (!empty($config['managed_group_slug'])) {
-            $group = \App\Models\Group::where('slug', $config['managed_group_slug'])->first();
-            if ($group) {
-                // Group Moderation (Highest priority in group)
-                if (!empty($config['enable_group_moderation'])) {
-                    if ($this->processGroupModeration($bot, $config, $group)) {
-                        $markActionDone('group_moderated');
-                        return $actions; // STOP EXECUTING
+            // 1. Auto-Posting on Feed
+            $postFreqHours = (int) ($config['post_frequency_hours'] ?? 0);
+            if ($postFreqHours > 0) {
+                $cacheKey = 'ai_member_last_post';
+                $lastPostTime = (int) Cache::get($cacheKey, 0);
+                $nextPostTime = $lastPostTime + ($postFreqHours * 3600);
+
+                if (time() >= $nextPostTime) {
+                    if ($this->generatePost($bot, $config)) {
+                        Cache::put($cacheKey, time(), now()->addDays(30));
+                        $markActionDone('post_created');
+                        return $actions; // Single action per tick
                     }
                 }
+            }
 
-                // Group Auto-Posting
-                $postFreq = intval($config['group_post_frequency_hours'] ?? 12);
-                if ($postFreq > 0) {
-                    $cacheKeyGrp = 'ai_member_last_grp_post_' . $group->id;
-                    $lastGrpPostTime = \Illuminate\Support\Facades\Cache::get($cacheKeyGrp, 0);
-                    if (time() >= ($lastGrpPostTime + ($postFreq * 3600))) {
-                        if ($this->generateGroupPost($bot, $config, $group)) {
-                            \Illuminate\Support\Facades\Cache::put($cacheKeyGrp, time(), now()->addDays(30));
-                            $markActionDone('group_post_created');
-                            return $actions; // STOP EXECUTING
+            // 2. Reply to Private Messages
+            if (!empty($config['enable_messages'])) {
+                if ($this->processMessages($bot, $config)) {
+                    $markActionDone('message_replied');
+                    return $actions;
+                }
+            }
+
+            // 3. Reply to Mentions and Comments on own posts
+            if (!empty($config['enable_comments'])) {
+                if ($this->processMentions($bot, $config)) {
+                    $markActionDone('mention_replied');
+                    return $actions;
+                }
+                if ($this->processComments($bot, $config)) {
+                    $markActionDone('comment_replied');
+                    return $actions;
+                }
+            }
+
+            // 4. Random Reaction
+            if (!empty($config['enable_reactions'])) {
+                $cacheKey = 'ai_member_last_reaction';
+                $lastReactionTime = (int) Cache::get($cacheKey, 0);
+                if (time() >= ($lastReactionTime + 7200)) {
+                    if ($this->generateReaction($bot)) {
+                        Cache::put($cacheKey, time(), now()->addDays(30));
+                        $markActionDone('reaction_added');
+                        return $actions;
+                    }
+                }
+            }
+
+            // 5. Group Management & Moderation
+            if (!empty($config['managed_group_slug'])) {
+                $group = Group::where('slug', $config['managed_group_slug'])->first();
+                if ($group) {
+                    // Group Moderation
+                    if (!empty($config['enable_group_moderation'])) {
+                        if ($this->processGroupModeration($bot, $config, $group)) {
+                            $markActionDone('group_moderated');
+                            return $actions;
+                        }
+                    }
+
+                    // Group Auto-Posting
+                    $postFreq = (int) ($config['group_post_frequency_hours'] ?? 12);
+                    if ($postFreq > 0) {
+                        $cacheKeyGrp = 'ai_member_last_grp_post_' . $group->id;
+                        $lastGrpPostTime = (int) Cache::get($cacheKeyGrp, 0);
+                        if (time() >= ($lastGrpPostTime + ($postFreq * 3600))) {
+                            if ($this->generateGroupPost($bot, $config, $group)) {
+                                Cache::put($cacheKeyGrp, time(), now()->addDays(30));
+                                $markActionDone('group_post_created');
+                                return $actions;
+                            }
+                        }
+                    }
+
+                    // Group Comments
+                    if (!empty($config['enable_comments'])) {
+                        if ($this->generateGroupComment($bot, $config, $group)) {
+                            $markActionDone('group_comment_added');
+                            return $actions;
                         }
                     }
                 }
-
-                // Group Comments
-                if (!empty($config['enable_comments'])) {
-                    if ($this->generateGroupComment($bot, $config, $group)) {
-                        $markActionDone('group_comment_added');
-                        return $actions; // STOP EXECUTING
-                    }
-                }
             }
-        }
 
-        return $actions;
+            return $actions;
+        }) ?? [];
     }
 
-    private function generatePost($bot, $config, $forcePrompt = null)
+    /**
+     * Generate and publish a community feed post.
+     */
+    public function generatePost(User $bot, array $config, ?string $forcePrompt = null): bool
     {
-        // Check if image posts are enabled and roll the dice
         $imageEnabled = !empty($config['enable_image_posts']);
         $imageChance = (int) ($config['image_post_chance'] ?? 20);
 
         if ($imageEnabled && !$forcePrompt && rand(1, 100) <= $imageChance) {
-            // Attempt to generate an image post
             $result = $this->generateImagePost($bot, $config);
             if ($result) {
-                return true; // Image post created successfully
+                return true;
             }
-            // Fallback to text-only post if image generation failed
             Log::info('AI Member: Image generation failed, falling back to text post.');
         }
 
@@ -444,8 +598,7 @@ class AiMemberService
         if ($forcePrompt) {
             $prompt = $forcePrompt;
         } else {
-            // Randomize the topic prompt slightly to avoid repetitive posts
-            $topics = ['share a tip', 'ask an engaging question to the community', 'share an interesting fact', 'wish everyone a great day'];
+            $topics = ['share a practical tip', 'ask an engaging question to the community', 'share an interesting tech or science fact', 'wish everyone a productive day'];
             $prompt = "Topic to write about right now: " . $topics[array_rand($topics)];
         }
 
@@ -454,7 +607,7 @@ class AiMemberService
         if ($content) {
             $time = time();
 
-            $topic = new \App\Models\ForumTopic();
+            $topic = new ForumTopic();
             $topic->uid = $bot->id;
             $topic->name = 'text';
             $topic->txt = $content;
@@ -472,6 +625,8 @@ class AiMemberService
             $status->date = $time;
             $status->statu = 1;
             $status->save();
+
+            $this->logActivity('post_created', 'Published community post #' . $topic->id . ': ' . Str::limit($content, 45));
             return true;
         }
 
@@ -480,17 +635,14 @@ class AiMemberService
 
     /**
      * Generate a community post with an AI-generated image (Gallery format).
-     * Creates a ForumTopic + Status (s_type=4) + Option (image_post) + ForumAttachment.
      */
-    private function generateImagePost($bot, $config)
+    public function generateImagePost(User $bot, array $config): bool
     {
         $persona = $config['persona_prompt'] ?? 'You are a helpful member of our community.';
         $imageStyle = $config['image_prompt_style'] ?? '';
 
-        // Step 1: Generate the post text
-        $textSystemPrompt = $persona . " Write a short, engaging community post (max 500 characters) that would pair well with an image. Do NOT include hashtags unless relevant. Do NOT use markdown formatting, just plain text.";
-
-        $topics = ['share a visual tip', 'describe something beautiful', 'share an inspiring thought', 'talk about an interesting place or concept'];
+        $textSystemPrompt = $persona . " Write a short, engaging community post (max 500 characters) that pairs naturally with a visual image. Do NOT include hashtags unless relevant. Do NOT use markdown formatting, just plain text.";
+        $topics = ['share an inspiring visual thought', 'describe something visually stunning in modern technology', 'talk about creative design', 'share a nature or architectural wonder'];
         $textPrompt = "Topic to write about right now: " . $topics[array_rand($topics)];
 
         $postText = $this->callGemini($textSystemPrompt, $textPrompt);
@@ -498,22 +650,20 @@ class AiMemberService
             return false;
         }
 
-        // Step 2: Generate an image related to the post text
-        $imagePrompt = "Generate a creative, visually appealing image that relates to this social media post: \"{$postText}\"";
+        $imagePrompt = "Generate a creative, visually striking photo that relates to this social media post: \"{$postText}\"";
         if ($imageStyle) {
             $imagePrompt .= " Style: {$imageStyle}.";
         }
-        $imagePrompt .= " The image should be eye-catching and suitable for a social media community feed. Do NOT include any text or watermarks in the image.";
+        $imagePrompt .= " High quality, vibrant lighting, suitable for a social community feed. Do NOT include any text, letters, watermarks, or logos.";
 
         $imagePath = $this->callGeminiImageGeneration($imagePrompt);
         if (!$imagePath) {
             return false;
         }
 
-        // Step 3: Create the Gallery post
         $time = time();
 
-        $topic = new \App\Models\ForumTopic();
+        $topic = new ForumTopic();
         $topic->uid = $bot->id;
         $topic->name = 'gallery';
         $topic->txt = $postText;
@@ -527,12 +677,11 @@ class AiMemberService
         $status = new Status();
         $status->uid = $bot->id;
         $status->tp_id = $topic->id;
-        $status->s_type = 4; // Gallery type
+        $status->s_type = 4;
         $status->date = $time;
         $status->statu = 1;
         $status->save();
 
-        // Create the Option record for image_post (required for gallery rendering)
         Option::updateOrCreate(
             ['o_parent' => $topic->id, 'o_type' => 'image_post'],
             [
@@ -543,7 +692,6 @@ class AiMemberService
             ]
         );
 
-        // Create the ForumAttachment record
         $fullFilePath = base_path($imagePath);
         ForumAttachment::create([
             'topic_id' => $topic->id,
@@ -555,25 +703,39 @@ class AiMemberService
             'sort_order' => 1,
         ]);
 
-        Log::info('AI Member: Image post created successfully. Topic ID: ' . $topic->id . ', Image: ' . $imagePath);
+        $this->logActivity('image_post_created', 'Published Gallery post #' . $topic->id . ' with AI image');
         return true;
     }
 
-    private function processMessages($bot, $config)
+    /**
+     * Process unread private messages sent to the bot.
+     */
+    private function processMessages(User $bot, array $config): bool
     {
-        // Find 1 unread message sent to the bot
+        $ignoredTasks = $this->getIgnoredTasks();
+
         $message = Message::where('us_rec', $bot->id)
             ->where('state', '!=', 0)
             ->orderBy('id_msg', 'desc')
             ->first();
 
-        if (!$message)
+        if (!$message) {
             return false;
+        }
+
+        if (in_array('message_' . $message->id_msg, $ignoredTasks, true)) {
+            $message->state = 0;
+            $message->save();
+            return false;
+        }
 
         return $this->replyToMessage($bot, $config, $message);
     }
 
-    private function replyToMessage($bot, $config, $message)
+    /**
+     * Reply to a private message.
+     */
+    public function replyToMessage(User $bot, array $config, Message $message): bool
     {
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
         $systemPrompt = $persona . " You are replying to a private message from another user. Be conversational and helpful. Do not use markdown.";
@@ -589,28 +751,25 @@ class AiMemberService
         $replyContent = $this->callGemini($systemPrompt, $message->text);
 
         if ($replyContent) {
-            // Check for auto block command first
+            // Check for auto block command
             if (!empty($config['enable_auto_block']) && $message->us_env != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
                 $blockDuration = trim($blockMatches[1]);
-                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
-                $abuser = \App\Models\User::find($message->us_env);
-                
-                if ($abuser) {
-                    $blockService = app(\App\Services\UserBlockService::class);
-                    // Messages only block since it occurred in PMs
-                    $blockService->blockUser($bot, $abuser, 'messages_only', $days);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int) $blockDuration);
+                $abuser = User::find($message->us_env);
+
+                if ($abuser && class_exists(UserBlockService::class)) {
+                    app(UserBlockService::class)->blockUser($bot, $abuser, 'messages_only', $days);
                 }
-                
-                // Mark message as read
+
                 Message::where('us_rec', $bot->id)
                     ->where('us_env', $message->us_env)
                     ->where('state', '!=', 0)
                     ->update(['state' => 0]);
-                    
+
+                $this->logActivity('user_blocked', 'Auto-blocked abusive user ID ' . $message->us_env . ' (Messages only)');
                 return true;
             }
 
-            // Mark ALL unread messages from this specific user as read
             Message::where('us_rec', $bot->id)
                 ->where('us_env', $message->us_env)
                 ->where('state', '!=', 0)
@@ -636,13 +795,12 @@ class AiMemberService
             $reply->us_rec = $message->us_env;
             $reply->text = $replyContent;
             $reply->time = time();
-            $reply->state = 3; // 3 means unread
+            $reply->state = 3;
             $reply->save();
 
-            // Send Notification
-            $sender = \App\Models\User::find($message->us_env);
-            if ($sender) {
-                app(\App\Services\NotificationService::class)->send(
+            $sender = User::find($message->us_env);
+            if ($sender && class_exists(NotificationService::class)) {
+                app(NotificationService::class)->send(
                     $sender,
                     __('messages.message_notification', ['user' => $bot->username]),
                     route('messages.show', Message::encodeConversationRouteKey($bot, $sender), false),
@@ -653,44 +811,53 @@ class AiMemberService
                 );
             }
 
+            $this->logActivity('message_replied', 'Replied to private message from @' . ($sender->username ?? 'User'));
             return true;
         }
 
         return false;
     }
 
-    private function processMentions($bot, $config)
+    /**
+     * Process recent mentions of the bot in comments.
+     */
+    private function processMentions(User $bot, array $config): bool
     {
-        // Find recent mentions of the bot in comments
-        $mentions = \App\Models\StatusMention::where('mentioned_user_id', $bot->id)
+        $mentions = StatusMention::where('mentioned_user_id', $bot->id)
             ->where('comment_type', 'forum')
             ->orderBy('id', 'desc')
             ->take(5)
             ->get();
 
-        $ignoredMentions = Cache::get('ai_member_ignored_mentions', []);
+        $ignoredMentions = array_merge(
+            (array) Cache::get('ai_member_ignored_mentions', []),
+            $this->getIgnoredTasks()
+        );
 
         foreach ($mentions as $mention) {
-            if (in_array($mention->id, $ignoredMentions)) {
+            if (in_array($mention->id, $ignoredMentions, true) || in_array('mention_' . $mention->id, $ignoredMentions, true)) {
                 continue;
             }
 
             if ($this->replyToMention($bot, $config, $mention)) {
-                return true; // Only 1 per tick
+                return true;
             }
         }
 
         return false;
     }
 
-    private function replyToMention($bot, $config, $mention)
+    /**
+     * Reply to a mention with true threaded nested comment parent_id support.
+     */
+    public function replyToMention(User $bot, array $config, StatusMention $mention): bool
     {
-        $mentionComment = \App\Models\ForumComment::find($mention->comment_id);
-        if (!$mentionComment)
+        $mentionComment = ForumComment::find($mention->comment_id);
+        if (!$mentionComment) {
             return false;
+        }
 
-        // Check if the bot has already replied to this specific topic AFTER this mention
-        $hasReplied = \App\Models\ForumComment::where('tid', $mentionComment->tid)
+        $hasReplied = ForumComment::where('tid', $mentionComment->tid)
             ->where('uid', $bot->id)
             ->where('id', '>', $mentionComment->id)
             ->exists();
@@ -699,17 +866,15 @@ class AiMemberService
             return false;
         }
 
-        // The bot needs to reply!
-        $topic = \App\Models\ForumTopic::find($mentionComment->tid);
-        if (!$topic)
+        $topic = ForumTopic::find($mentionComment->tid);
+        if (!$topic) {
             return false;
+        }
 
-        $mentioner = \App\Models\User::find($mention->user_id);
+        $mentioner = User::find($mention->user_id);
         $mentionerName = $mentioner ? $mentioner->username : 'A user';
-
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
 
-        // Construct the prompt with context
         $systemPrompt = $persona . " 
 You were mentioned by @{$mentionerName} in a comment on a community post. 
 You must reply to them directly, and your reply must be relevant to BOTH their comment and the original post's topic. 
@@ -721,83 +886,99 @@ ORIGINAL POST TEXT:
 THEIR COMMENT MENTIONING YOU:
 \"" . strip_tags($mentionComment->txt) . "\"";
 
-        if (!empty($config['enable_auto_block']) && $mentioner->id != 1) {
+        if (!empty($config['enable_auto_block']) && $mentioner && $mentioner->id != 1) {
             $systemPrompt .= "\nSPECIAL INSTRUCTION: If their comment is highly abusive, offensive, or harassing you, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_BLOCK: duration]' where 'duration' is the number of days to block the user based on severity, or 'forever' for an indefinite block. Example: [CMD_BLOCK: 7] or [CMD_BLOCK: forever].";
         }
 
         $replyContent = $this->callGemini($systemPrompt, "Please reply to the comment above.");
 
         if ($replyContent) {
-            // Check for auto block command first
-            if (!empty($config['enable_auto_block']) && $mentioner->id != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
+            if (!empty($config['enable_auto_block']) && $mentioner && $mentioner->id != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
                 $blockDuration = trim($blockMatches[1]);
-                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
-                $abuser = \App\Models\User::find($mentioner->id);
-                
-                if ($abuser) {
-                    $blockService = app(\App\Services\UserBlockService::class);
-                    // Full platform block since it's a public comment
-                    $blockService->blockUser($bot, $abuser, 'full_platform', $days);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int) $blockDuration);
+
+                if (class_exists(UserBlockService::class)) {
+                    app(UserBlockService::class)->blockUser($bot, $mentioner, 'full_platform', $days);
                 }
-                
+
+                $this->logActivity('user_blocked', 'Auto-blocked abusive mentioner @' . $mentionerName);
                 return true;
             }
 
             $mentionText = $mentioner ? '@' . $mentioner->username . ' ' : '';
 
-            $reply = new \App\Models\ForumComment();
+            $reply = new ForumComment();
             $reply->uid = $bot->id;
             $reply->tid = $topic->id;
+            // Threaded nested reply link (v4.6.x standard)
+            $reply->parent_id = $mentionComment->id;
             $reply->txt = $mentionText . $replyContent;
             $reply->date = time();
             $reply->save();
 
             // Trigger Mentions
-            app(\App\Services\MentionService::class)->createCommentMentions(
-                $bot,
-                'forum',
-                (int) $reply->id,
-                $reply->txt,
-                "/t" . $topic->id
-            );
+            if (class_exists(MentionService::class)) {
+                app(MentionService::class)->createCommentMentions(
+                    $bot,
+                    'forum',
+                    (int) $reply->id,
+                    $reply->txt,
+                    "/t" . $topic->id
+                );
+            }
 
-            // Update the reply count on the topic
+            // Dispatch parent author notification if different
+            if ($mentioner && $mentioner->id != $bot->id && class_exists(NotificationService::class)) {
+                app(NotificationService::class)->send(
+                    $mentioner,
+                    __('messages.user_replied_to_your_comment', ['user' => $bot->username]),
+                    "/t" . $topic->id,
+                    'reply',
+                    $bot->id,
+                    'forum_reply'
+                );
+            }
+
             $topic->increment('reply');
-
+            $this->logActivity('mention_replied', 'Replied to @' . $mentionerName . ' on topic #' . $topic->id);
             return true;
         }
 
         return false;
     }
 
-    private function processComments($bot, $config)
+    /**
+     * Process comments on bot's own posts.
+     */
+    private function processComments(User $bot, array $config): bool
     {
-        // Find recent posts by the bot
         $recentStatuses = Status::where('uid', $bot->id)
             ->whereIn('s_type', [100, 4, 2])
             ->orderBy('id', 'desc')
             ->take(5)
             ->pluck('tp_id');
 
-        if ($recentStatuses->isEmpty())
+        if ($recentStatuses->isEmpty()) {
             return false;
+        }
 
-        $ignoredComments = Cache::get('ai_member_ignored_comments', []);
+        $ignoredComments = array_merge(
+            (array) Cache::get('ai_member_ignored_comments', []),
+            $this->getIgnoredTasks()
+        );
 
         foreach ($recentStatuses as $tid) {
-            // Find the latest comment on THIS specific post
             $latestComment = ForumComment::where('tid', $tid)
                 ->orderBy('id', 'desc')
                 ->first();
 
-            // If there's a comment and it's NOT from the bot, reply to it
             if ($latestComment && $latestComment->uid != $bot->id) {
-                if (in_array($latestComment->id, $ignoredComments)) {
+                if (in_array($latestComment->id, $ignoredComments, true) || in_array('comment_' . $latestComment->id, $ignoredComments, true)) {
                     continue;
                 }
 
                 if ($this->replyToComment($bot, $config, $latestComment)) {
-                    return true; // Process one comment per tick to keep it natural
+                    return true;
                 }
             }
         }
@@ -805,11 +986,13 @@ THEIR COMMENT MENTIONING YOU:
         return false;
     }
 
-    private function replyToComment($bot, $config, $latestComment)
+    /**
+     * Reply to a comment on bot's own post with threaded parent_id and notifications.
+     */
+    public function replyToComment(User $bot, array $config, ForumComment $latestComment): bool
     {
         $tid = $latestComment->tid;
 
-        // Check if there is already a reply from the bot AFTER this comment
         $hasReplied = ForumComment::where('tid', $tid)
             ->where('uid', $bot->id)
             ->where('id', '>', $latestComment->id)
@@ -819,10 +1002,13 @@ THEIR COMMENT MENTIONING YOU:
             return false;
         }
 
-        $topic = \App\Models\ForumTopic::find($tid);
-        if (!$topic)
+        $topic = ForumTopic::find($tid);
+        if (!$topic) {
             return false;
+        }
 
+        $commentAuthor = User::find($latestComment->uid);
+        $authorName = $commentAuthor ? $commentAuthor->username : 'User';
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
 
         $systemPrompt = $persona . " 
@@ -836,87 +1022,98 @@ YOUR ORIGINAL POST TEXT:
 THEIR COMMENT TO YOU:
 \"" . strip_tags($latestComment->txt) . "\"";
 
-        if (!empty($config['enable_auto_block']) && $latestComment->uid != 1) {
+        if (!empty($config['enable_auto_block']) && $commentAuthor && $commentAuthor->id != 1) {
             $systemPrompt .= "\nSPECIAL INSTRUCTION: If their comment is highly abusive, offensive, or harassing you, DO NOT reply normally. Instead, you MUST reply with exactly this strict format: '[CMD_BLOCK: duration]' where 'duration' is the number of days to block the user based on severity, or 'forever' for an indefinite block. Example: [CMD_BLOCK: 7] or [CMD_BLOCK: forever].";
         }
 
         $replyContent = $this->callGemini($systemPrompt, "Please reply to their comment.");
 
         if ($replyContent) {
-            // Check for auto block command first
-            if (!empty($config['enable_auto_block']) && $latestComment->uid != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
+            if (!empty($config['enable_auto_block']) && $commentAuthor && $commentAuthor->id != 1 && preg_match('/\[CMD_BLOCK:\s*(.*?)\]/i', $replyContent, $blockMatches)) {
                 $blockDuration = trim($blockMatches[1]);
-                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int)$blockDuration);
-                $abuser = \App\Models\User::find($latestComment->uid);
-                
-                if ($abuser) {
-                    $blockService = app(\App\Services\UserBlockService::class);
-                    // Full platform block since it's a public comment
-                    $blockService->blockUser($bot, $abuser, 'full_platform', $days);
+                $days = (strtolower($blockDuration) === 'forever') ? null : max(1, (int) $blockDuration);
+
+                if (class_exists(UserBlockService::class)) {
+                    app(UserBlockService::class)->blockUser($bot, $commentAuthor, 'full_platform', $days);
                 }
-                
+
+                $this->logActivity('user_blocked', 'Auto-blocked commenter @' . $authorName);
                 return true;
             }
 
-            $commentAuthor = \App\Models\User::find($latestComment->uid);
             $mention = $commentAuthor ? '@' . $commentAuthor->username . ' ' : '';
 
             $reply = new ForumComment();
             $reply->uid = $bot->id;
             $reply->tid = $tid;
+            // Threaded nested reply (v4.6.x standard)
+            $reply->parent_id = $latestComment->id;
             $reply->txt = $mention . $replyContent;
             $reply->date = time();
             $reply->save();
 
-            // Trigger Mentions
-            app(\App\Services\MentionService::class)->createCommentMentions(
-                $bot,
-                'forum',
-                (int) $reply->id,
-                $reply->txt,
-                "/t" . $tid
-            );
+            if (class_exists(MentionService::class)) {
+                app(MentionService::class)->createCommentMentions(
+                    $bot,
+                    'forum',
+                    (int) $reply->id,
+                    $reply->txt,
+                    "/t" . $tid
+                );
+            }
 
-            // Update the reply count on the topic
+            // Dispatch reply notification to author
+            if ($commentAuthor && $commentAuthor->id != $bot->id && class_exists(NotificationService::class)) {
+                app(NotificationService::class)->send(
+                    $commentAuthor,
+                    __('messages.user_replied_to_your_comment', ['user' => $bot->username]),
+                    "/t" . $tid,
+                    'reply',
+                    $bot->id,
+                    'forum_reply'
+                );
+            }
+
             $topic->increment('reply');
-
+            $this->logActivity('comment_replied', 'Replied to @' . $authorName . ' on topic #' . $tid);
             return true;
         }
 
         return false;
     }
 
-    private function generateReaction($bot)
+    /**
+     * Add a random reaction (like/love/wow) to a recent community post.
+     */
+    public function generateReaction(User $bot): bool
     {
-        // Find a recent status not by bot
         $status = Status::where('uid', '!=', $bot->id)
             ->whereIn('s_type', [100, 4, 2, 1, 7867])
             ->orderBy('id', 'desc')
             ->first();
 
-        if (!$status)
+        if (!$status) {
             return false;
+        }
 
-        // Check if already liked
-        $sid = ($status->s_type == 100 || $status->s_type == 4 || $status->s_type == 2) ? $status->tp_id : $status->id;
-
-        // Wait, what is the ID for likes?
-        // Status.php: $this->interactionSubjectId() returns $this->tp_id for standard posts.
         $sid = $status->tp_id;
 
-        $type = 2; // For standard posts (2, 4, 100)
-        if ($status->s_type == 1)
+        $type = 2;
+        if ($status->s_type == 1) {
             $type = 22;
-        if ($status->s_type == 7867)
+        }
+        if ($status->s_type == 7867) {
             $type = 3;
+        }
 
         $exists = Like::where('sid', $sid)
             ->where('uid', $bot->id)
             ->where('type', $type)
             ->exists();
 
-        if ($exists)
+        if ($exists) {
             return false;
+        }
 
         $like = new Like();
         $like->sid = $sid;
@@ -932,15 +1129,14 @@ THEIR COMMENT TO YOU:
             'o_type' => 'data_reaction',
             'o_order' => $bot->id,
             'o_valuer' => $reaction,
-            'o_mode' => $like->time_t
+            'o_mode' => $like->time_t,
         ]);
 
-        // Send Notification to owner
         $ownerId = null;
         $postUrl = "";
 
         if ($type == 2) {
-            $topic = \App\Models\ForumTopic::find($sid);
+            $topic = ForumTopic::find($sid);
             $ownerId = $topic ? $topic->uid : null;
             $postUrl = "/t" . $sid;
         } elseif ($type == 22) {
@@ -949,8 +1145,8 @@ THEIR COMMENT TO YOU:
             $postUrl = "/dr" . $sid;
         }
 
-        if ($ownerId && $ownerId != $bot->id) {
-            app(\App\Services\NotificationService::class)->send(
+        if ($ownerId && $ownerId != $bot->id && class_exists(NotificationService::class)) {
+            app(NotificationService::class)->send(
                 $ownerId,
                 __('messages.reaction_notification', ['user' => $bot->username]),
                 $postUrl,
@@ -960,17 +1156,21 @@ THEIR COMMENT TO YOU:
             );
         }
 
+        $this->logActivity('reaction_added', 'Reacted with "' . $reaction . '" on item #' . $sid);
         return true;
     }
 
-    private function generateGroupPost($bot, $config, $group)
+    /**
+     * Create an autonomous post in a managed group.
+     */
+    public function generateGroupPost(User $bot, array $config, Group $group): bool
     {
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
         $rules = $config['group_rules'] ?? '';
 
         $systemPrompt = $persona . " 
-You are the owner and manager of a community group.
-Write an engaging post (max 500 characters) for your group members.
+You are the owner and manager of a community group named \"{$group->name}\".
+Write an engaging topic (max 500 characters) for your group members.
 Start a discussion, ask a question, or share an insight related to the group's theme.
 Do NOT use markdown.
 Group Rules for context: {$rules}";
@@ -979,7 +1179,7 @@ Group Rules for context: {$rules}";
 
         if ($content) {
             $time = time();
-            $topic = new \App\Models\ForumTopic();
+            $topic = new ForumTopic();
             $topic->uid = $bot->id;
             $topic->name = 'text';
             $topic->txt = $content;
@@ -991,7 +1191,7 @@ Group Rules for context: {$rules}";
             $topic->vu = 0;
             $topic->save();
 
-            $status = new \App\Models\Status();
+            $status = new Status();
             $status->uid = $bot->id;
             $status->tp_id = $topic->id;
             $status->s_type = 100;
@@ -1001,50 +1201,59 @@ Group Rules for context: {$rules}";
             $status->save();
 
             $group->increment('posts_count');
-
+            $this->logActivity('group_post_created', 'Created topic in group: ' . $group->name);
             return true;
         }
+
         return false;
     }
 
-    private function generateGroupComment($bot, $config, $group)
+    /**
+     * Autonomous comment in a managed group topic.
+     */
+    public function generateGroupComment(User $bot, array $config, Group $group): bool
     {
-        // 30% chance to comment per tick on the latest topic
-        if (rand(1, 100) > 30)
+        if (rand(1, 100) > 30) {
             return false;
+        }
 
-        $latestTopic = \App\Models\ForumTopic::where('group_id', $group->id)
+        $latestTopic = ForumTopic::where('group_id', $group->id)
             ->where('uid', '!=', $bot->id)
             ->orderBy('id', 'desc')
             ->first();
 
-        if (!$latestTopic)
+        if (!$latestTopic) {
             return false;
+        }
 
-        $hasCommented = \App\Models\ForumComment::where('tid', $latestTopic->id)
+        $hasCommented = ForumComment::where('tid', $latestTopic->id)
             ->where('uid', $bot->id)
             ->exists();
 
-        if ($hasCommented)
+        if ($hasCommented) {
             return false;
+        }
 
-        $ignoredGroupTopics = Cache::get('ai_member_ignored_group_topics', []);
-        if (in_array($latestTopic->id, $ignoredGroupTopics)) {
+        $ignoredGroupTopics = (array) Cache::get('ai_member_ignored_group_topics', []);
+        if (in_array($latestTopic->id, $ignoredGroupTopics, true) || in_array('group_comment_' . $latestTopic->id, $this->getIgnoredTasks(), true)) {
             return false;
         }
 
         return $this->commentOnGroupTopic($bot, $config, $latestTopic);
     }
 
-    private function commentOnGroupTopic($bot, $config, $latestTopic)
+    /**
+     * Comment on a group topic.
+     */
+    public function commentOnGroupTopic(User $bot, array $config, ForumTopic $latestTopic): bool
     {
-        // Check hasCommented again to be safe
-        $hasCommented = \App\Models\ForumComment::where('tid', $latestTopic->id)
+        $hasCommented = ForumComment::where('tid', $latestTopic->id)
             ->where('uid', $bot->id)
             ->exists();
 
-        if ($hasCommented)
+        if ($hasCommented) {
             return false;
+        }
 
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
         $systemPrompt = $persona . " 
@@ -1058,7 +1267,7 @@ POST TEXT:
         $replyContent = $this->callGemini($systemPrompt, "Please write a comment.");
 
         if ($replyContent) {
-            $reply = new \App\Models\ForumComment();
+            $reply = new ForumComment();
             $reply->uid = $bot->id;
             $reply->tid = $latestTopic->id;
             $reply->txt = $replyContent;
@@ -1067,31 +1276,38 @@ POST TEXT:
 
             $latestTopic->increment('reply');
 
-            app(\App\Services\NotificationService::class)->send(
-                $latestTopic->uid,
-                __('messages.comment_notification', ['user' => $bot->username]),
-                "/t" . $latestTopic->id,
-                'logo',
-                $bot->id,
-                'forum_reply'
-            );
+            if (class_exists(NotificationService::class)) {
+                app(NotificationService::class)->send(
+                    $latestTopic->uid,
+                    __('messages.comment_notification', ['user' => $bot->username]),
+                    "/t" . $latestTopic->id,
+                    'logo',
+                    $bot->id,
+                    'forum_reply'
+                );
+            }
 
+            $this->logActivity('group_comment_added', 'Commented on topic #' . $latestTopic->id . ' in group');
             return true;
         }
 
         return false;
     }
 
-    private function processGroupModeration($bot, $config, $group)
+    /**
+     * Strict group moderation workflow.
+     */
+    private function processGroupModeration(User $bot, array $config, Group $group): bool
     {
         $rules = $config['group_rules'] ?? '';
-        if (empty($rules))
+        if (empty($rules)) {
             return false;
+        }
 
         $cacheKey = 'ai_member_last_mod_topic_' . $group->id;
-        $lastTopicId = Cache::get($cacheKey, 0);
+        $lastTopicId = (int) Cache::get($cacheKey, 0);
 
-        $topic = \App\Models\ForumTopic::where('group_id', $group->id)
+        $topic = ForumTopic::where('group_id', $group->id)
             ->where('uid', '!=', $bot->id)
             ->where('id', '>', $lastTopicId)
             ->orderBy('id', 'asc')
@@ -1104,13 +1320,14 @@ POST TEXT:
         }
 
         $cacheKeyCom = 'ai_member_last_mod_com_' . $group->id;
-        $lastComId = Cache::get($cacheKeyCom, 0);
+        $lastComId = (int) Cache::get($cacheKeyCom, 0);
 
-        $topicIds = \App\Models\ForumTopic::where('group_id', $group->id)->pluck('id');
-        if ($topicIds->isEmpty())
+        $topicIds = ForumTopic::where('group_id', $group->id)->pluck('id');
+        if ($topicIds->isEmpty()) {
             return false;
+        }
 
-        $comment = \App\Models\ForumComment::whereIn('tid', $topicIds)
+        $comment = ForumComment::whereIn('tid', $topicIds)
             ->where('uid', '!=', $bot->id)
             ->where('id', '>', $lastComId)
             ->orderBy('id', 'asc')
@@ -1125,7 +1342,10 @@ POST TEXT:
         return false;
     }
 
-    private function moderateContent($bot, $group, $rules, $contentObj, $type)
+    /**
+     * AI-based moderation content checker.
+     */
+    private function moderateContent(User $bot, Group $group, string $rules, $contentObj, string $type): void
     {
         $text = strip_tags($contentObj->txt);
         $userId = $contentObj->uid;
@@ -1149,32 +1369,37 @@ TEXT TO REVIEW:
         if ($response) {
             if (preg_match('/\[MOD_DELETE\](.*)/i', $response, $matches)) {
                 $reason = trim($matches[1] ?? 'Violation of group rules');
-                if ($type == 'topic') {
+                if ($type === 'topic') {
                     $contentObj->delete();
-                    \App\Models\Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
+                    Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
                 } else {
                     $contentObj->delete();
                 }
                 $this->notifyUserOfModeration($bot, $userId, $group, $reason, false);
+                $this->logActivity('group_moderated', 'Deleted violating ' . $type . ' in group ' . $group->name);
             } elseif (preg_match('/\[MOD_KICK\](.*)/i', $response, $matches)) {
                 $reason = trim($matches[1] ?? 'Severe violation of group rules');
-                if ($type == 'topic') {
+                if ($type === 'topic') {
                     $contentObj->delete();
-                    \App\Models\Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
+                    Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
                 } else {
                     $contentObj->delete();
                 }
-                
-                \App\Models\GroupMembership::where('group_id', $group->id)
+
+                GroupMembership::where('group_id', $group->id)
                     ->where('user_id', $userId)
                     ->delete();
-                    
+
                 $this->notifyUserOfModeration($bot, $userId, $group, $reason, true);
+                $this->logActivity('group_moderated', 'Kicked member UID ' . $userId . ' from group ' . $group->name);
             }
         }
     }
 
-    private function notifyUserOfModeration($bot, $userId, $group, $reason, $isKick)
+    /**
+     * Dispatch notification & PM to moderated user.
+     */
+    private function notifyUserOfModeration(User $bot, int $userId, Group $group, string $reason, bool $isKick): void
     {
         $groupName = $group->name;
 
@@ -1182,10 +1407,9 @@ TEXT TO REVIEW:
         $pmBodyKey = $isKick ? 'ai_member::messages.mod_pm_kick_body' : 'ai_member::messages.mod_pm_delete_body';
         $pmBody = __($pmBodyKey, ['group' => $groupName, 'reason' => $reason]);
         $pmFooter = __('ai_member::messages.mod_pm_footer');
-        
         $pmText = "{$pmTitle}\n\n{$pmBody}\n\n{$pmFooter}";
 
-        $message = new \App\Models\Message();
+        $message = new Message();
         $message->name = $bot->username ?? 'AI Member';
         $message->us_rec = $userId;
         $message->us_env = $bot->id;
@@ -1197,20 +1421,25 @@ TEXT TO REVIEW:
         $notifKey = $isKick ? 'ai_member::messages.mod_notif_kick' : 'ai_member::messages.mod_notif_delete';
         $notifText = __($notifKey, ['group' => $groupName]);
 
-        app(\App\Services\NotificationService::class)->send(
-            $userId,
-            $notifText,
-            "/groups/" . $group->slug,
-            'logo',
-            $bot->id,
-            'system'
-        );
+        if (class_exists(NotificationService::class)) {
+            app(NotificationService::class)->send(
+                $userId,
+                $notifText,
+                "/groups/" . $group->slug,
+                'logo',
+                $bot->id,
+                'system'
+            );
+        }
     }
 
-    public function getPendingTasks()
+    /**
+     * Retrieve the prioritized interaction queue (4 priority tiers).
+     */
+    public function getPendingTasks(): array
     {
         $tasks = [];
-        
+
         if (!$this->isEnabled()) {
             return [];
         }
@@ -1221,58 +1450,10 @@ TEXT TO REVIEW:
             return [];
         }
 
+        $ignoredTasks = $this->getIgnoredTasks();
         $now = time();
 
-        // 1. Auto-Posting on Portal
-        $postFreqHours = (int) ($config['post_frequency_hours'] ?? 0);
-        if ($postFreqHours > 0) {
-            $lastPostTime = Cache::get('ai_member_last_post', 0);
-            $nextPostTime = $lastPostTime + ($postFreqHours * 3600);
-            $tasks[] = [
-                'key' => 'feed_post',
-                'name' => __('ai_member::messages.task_feed_post_name'),
-                'type' => 'feed_post',
-                'scheduled_at' => $nextPostTime,
-                'status' => $now >= $nextPostTime ? 'ready' : 'scheduled',
-                'detail' => __('ai_member::messages.task_feed_post_detail', ['time' => date('Y-m-d H:i:s', $nextPostTime)]),
-            ];
-        }
-
-        // 2. Auto-Posting in Group
-        if (!empty($config['managed_group_slug'])) {
-            $group = \App\Models\Group::where('slug', $config['managed_group_slug'])->first();
-            if ($group) {
-                $groupPostFreqHours = (int) ($config['group_post_frequency_hours'] ?? 12);
-                if ($groupPostFreqHours > 0) {
-                    $lastGrpPostTime = Cache::get('ai_member_last_grp_post_' . $group->id, 0);
-                    $nextGrpPostTime = $lastGrpPostTime + ($groupPostFreqHours * 3600);
-                    $tasks[] = [
-                        'key' => 'group_post',
-                        'name' => __('ai_member::messages.task_group_post_name', ['group' => $group->name]),
-                        'type' => 'group_post',
-                        'scheduled_at' => $nextGrpPostTime,
-                        'status' => $now >= $nextGrpPostTime ? 'ready' : 'scheduled',
-                        'detail' => __('ai_member::messages.task_group_post_detail', ['time' => date('Y-m-d H:i:s', $nextGrpPostTime)]),
-                    ];
-                }
-            }
-        }
-
-        // 3. Random Reactions
-        if (!empty($config['enable_reactions'])) {
-            $lastReactionTime = Cache::get('ai_member_last_reaction', 0);
-            $nextReactionTime = $lastReactionTime + 7200; // 2 hours
-            $tasks[] = [
-                'key' => 'reaction',
-                'name' => __('ai_member::messages.task_reaction_name'),
-                'type' => 'reaction',
-                'scheduled_at' => $nextReactionTime,
-                'status' => $now >= $nextReactionTime ? 'ready' : 'scheduled',
-                'detail' => __('ai_member::messages.task_reaction_detail', ['time' => date('Y-m-d H:i:s', $nextReactionTime)]),
-            ];
-        }
-
-        // 4. Unread Messages (PMs)
+        // Tier 1: Private Messages [Urgent]
         if (!empty($config['enable_messages'])) {
             $unreadMessages = Message::where('us_rec', $bot->id)
                 ->where('state', '!=', 0)
@@ -1280,39 +1461,50 @@ TEXT TO REVIEW:
                 ->get();
 
             foreach ($unreadMessages as $msg) {
+                $taskKey = 'message_' . $msg->id_msg;
+                if (in_array($taskKey, $ignoredTasks, true)) {
+                    continue;
+                }
+
                 $sender = User::find($msg->us_env);
-                $senderName = $sender ? $sender->username : 'System';
+                $senderName = $sender ? $sender->username : 'User';
                 $tasks[] = [
-                    'key' => 'message_' . $msg->id_msg,
+                    'key' => $taskKey,
                     'name' => __('ai_member::messages.task_message_name', ['user' => $senderName]),
-                    'type' => 'message',
+                    'type' => 'pm',
+                    'priority' => 1,
+                    'priority_label' => __('ai_member::messages.priority_urgent'),
+                    'priority_class' => 'bg-danger text-white',
                     'scheduled_at' => $msg->time,
                     'status' => 'pending',
                     'detail' => '"' . Str::limit(strip_tags($msg->text), 60) . '"',
+                    'executable' => true,
                 ];
             }
         }
 
-        // 5. Mentions in Comments
+        // Tier 2: Mentions in Comments [High]
         if (!empty($config['enable_comments'])) {
-            $mentions = \App\Models\StatusMention::where('mentioned_user_id', $bot->id)
+            $mentions = StatusMention::where('mentioned_user_id', $bot->id)
                 ->where('comment_type', 'forum')
                 ->orderBy('id', 'desc')
                 ->take(10)
                 ->get();
 
-            $ignoredMentions = Cache::get('ai_member_ignored_mentions', []);
+            $ignoredMentions = (array) Cache::get('ai_member_ignored_mentions', []);
 
             foreach ($mentions as $mention) {
-                if (in_array($mention->id, $ignoredMentions)) {
+                $taskKey = 'mention_' . $mention->id;
+                if (in_array($mention->id, $ignoredMentions, true) || in_array($taskKey, $ignoredTasks, true)) {
                     continue;
                 }
 
-                $mentionComment = \App\Models\ForumComment::find($mention->comment_id);
-                if (!$mentionComment) continue;
+                $mentionComment = ForumComment::find($mention->comment_id);
+                if (!$mentionComment) {
+                    continue;
+                }
 
-                // Check if replied
-                $hasReplied = \App\Models\ForumComment::where('tid', $mentionComment->tid)
+                $hasReplied = ForumComment::where('tid', $mentionComment->tid)
                     ->where('uid', $bot->id)
                     ->where('id', '>', $mentionComment->id)
                     ->exists();
@@ -1321,24 +1513,30 @@ TEXT TO REVIEW:
                     $mentioner = User::find($mention->user_id);
                     $mentionerName = $mentioner ? $mentioner->username : 'User';
                     $tasks[] = [
-                        'key' => 'mention_' . $mention->id,
+                        'key' => $taskKey,
                         'name' => __('ai_member::messages.task_mention_name', ['user' => $mentionerName]),
                         'type' => 'mention',
+                        'priority' => 2,
+                        'priority_label' => __('ai_member::messages.priority_high'),
+                        'priority_class' => 'bg-warning-subtle text-dark border border-warning',
                         'scheduled_at' => $mentionComment->date,
                         'status' => 'pending',
                         'detail' => '"' . Str::limit(strip_tags($mentionComment->txt), 60) . '"',
+                        'executable' => true,
                     ];
                 }
             }
+        }
 
-            // 6. Comments on Bot's own posts
+        // Tier 3: Comments on Bot Posts [Normal]
+        if (!empty($config['enable_comments'])) {
             $recentStatuses = Status::where('uid', $bot->id)
                 ->whereIn('s_type', [100, 4, 2])
                 ->orderBy('id', 'desc')
                 ->take(5)
                 ->pluck('tp_id');
 
-            $ignoredComments = Cache::get('ai_member_ignored_comments', []);
+            $ignoredComments = (array) Cache::get('ai_member_ignored_comments', []);
 
             foreach ($recentStatuses as $tid) {
                 $latestComment = ForumComment::where('tid', $tid)
@@ -1346,11 +1544,11 @@ TEXT TO REVIEW:
                     ->first();
 
                 if ($latestComment && $latestComment->uid != $bot->id) {
-                    if (in_array($latestComment->id, $ignoredComments)) {
+                    $taskKey = 'comment_' . $latestComment->id;
+                    if (in_array($latestComment->id, $ignoredComments, true) || in_array($taskKey, $ignoredTasks, true)) {
                         continue;
                     }
 
-                    // Check if replied
                     $hasReplied = ForumComment::where('tid', $tid)
                         ->where('uid', $bot->id)
                         ->where('id', '>', $latestComment->id)
@@ -1359,47 +1557,56 @@ TEXT TO REVIEW:
                     if (!$hasReplied) {
                         $commenter = User::find($latestComment->uid);
                         $commenterName = $commenter ? $commenter->username : 'User';
-                        $topic = \App\Models\ForumTopic::find($tid);
+                        $topic = ForumTopic::find($tid);
                         $topicName = $topic ? Str::limit($topic->txt, 20) : 'Post';
 
                         $tasks[] = [
-                            'key' => 'comment_' . $latestComment->id,
+                            'key' => $taskKey,
                             'name' => __('ai_member::messages.task_comment_name', ['user' => $commenterName]),
                             'type' => 'comment',
+                            'priority' => 3,
+                            'priority_label' => __('ai_member::messages.priority_normal'),
+                            'priority_class' => 'bg-secondary-subtle text-secondary',
                             'scheduled_at' => $latestComment->date,
                             'status' => 'pending',
                             'detail' => __('ai_member::messages.task_comment_detail', ['topic' => $topicName, 'comment' => Str::limit(strip_tags($latestComment->txt), 40)]),
+                            'executable' => true,
                         ];
                     }
                 }
             }
 
-            // 7. Group Comments
+            // Group comments
             if (!empty($config['managed_group_slug'])) {
-                $group = \App\Models\Group::where('slug', $config['managed_group_slug'])->first();
+                $group = Group::where('slug', $config['managed_group_slug'])->first();
                 if ($group) {
-                    $latestTopic = \App\Models\ForumTopic::where('group_id', $group->id)
+                    $latestTopic = ForumTopic::where('group_id', $group->id)
                         ->where('uid', '!=', $bot->id)
                         ->orderBy('id', 'desc')
                         ->first();
 
                     if ($latestTopic) {
-                        $hasCommented = \App\Models\ForumComment::where('tid', $latestTopic->id)
+                        $taskKey = 'group_comment_' . $latestTopic->id;
+                        $ignoredGroupTopics = (array) Cache::get('ai_member_ignored_group_topics', []);
+
+                        $hasCommented = ForumComment::where('tid', $latestTopic->id)
                             ->where('uid', $bot->id)
                             ->exists();
 
-                        $ignoredGroupTopics = Cache::get('ai_member_ignored_group_topics', []);
-
-                        if (!$hasCommented && !in_array($latestTopic->id, $ignoredGroupTopics)) {
+                        if (!$hasCommented && !in_array($latestTopic->id, $ignoredGroupTopics, true) && !in_array($taskKey, $ignoredTasks, true)) {
                             $topicAuthor = User::find($latestTopic->uid);
                             $authorName = $topicAuthor ? $topicAuthor->username : 'User';
                             $tasks[] = [
-                                'key' => 'group_comment_' . $latestTopic->id,
+                                'key' => $taskKey,
                                 'name' => __('ai_member::messages.task_group_comment_name', ['user' => $authorName]),
                                 'type' => 'group_comment',
+                                'priority' => 3,
+                                'priority_label' => __('ai_member::messages.priority_normal'),
+                                'priority_class' => 'bg-secondary-subtle text-secondary',
                                 'scheduled_at' => $latestTopic->date,
                                 'status' => 'pending',
                                 'detail' => '"' . Str::limit(strip_tags($latestTopic->txt), 60) . '"',
+                                'executable' => true,
                             ];
                         }
                     }
@@ -1407,38 +1614,106 @@ TEXT TO REVIEW:
             }
         }
 
-        // Sort tasks by status (ready/pending first, then scheduled) and scheduled_at time
-        usort($tasks, function ($a, $b) {
-            $statusOrder = ['ready' => 0, 'pending' => 0, 'scheduled' => 1];
-            $aOrder = $statusOrder[$a['status']] ?? 2;
-            $bOrder = $statusOrder[$b['status']] ?? 2;
-            
-            if ($aOrder === $bOrder) {
-                return $a['scheduled_at'] <=> $b['scheduled_at'];
+        // Tier 4: Scheduled Background Actions [Routine]
+        $postFreqHours = (int) ($config['post_frequency_hours'] ?? 0);
+        if ($postFreqHours > 0) {
+            $lastPostTime = (int) Cache::get('ai_member_last_post', 0);
+            $nextPostTime = $lastPostTime + ($postFreqHours * 3600);
+            $tasks[] = [
+                'key' => 'feed_post',
+                'name' => __('ai_member::messages.task_feed_post_name'),
+                'type' => 'scheduled',
+                'priority' => 4,
+                'priority_label' => __('ai_member::messages.priority_routine'),
+                'priority_class' => 'bg-info-subtle text-info',
+                'scheduled_at' => $nextPostTime,
+                'status' => $now >= $nextPostTime ? 'ready' : 'scheduled',
+                'detail' => __('ai_member::messages.task_feed_post_detail', ['time' => date('Y-m-d H:i:s', $nextPostTime)]),
+                'executable' => true,
+            ];
+        }
+
+        if (!empty($config['managed_group_slug'])) {
+            $group = Group::where('slug', $config['managed_group_slug'])->first();
+            if ($group) {
+                $groupPostFreqHours = (int) ($config['group_post_frequency_hours'] ?? 12);
+                if ($groupPostFreqHours > 0) {
+                    $lastGrpPostTime = (int) Cache::get('ai_member_last_grp_post_' . $group->id, 0);
+                    $nextGrpPostTime = $lastGrpPostTime + ($groupPostFreqHours * 3600);
+                    $tasks[] = [
+                        'key' => 'group_post',
+                        'name' => __('ai_member::messages.task_group_post_name', ['group' => $group->name]),
+                        'type' => 'scheduled',
+                        'priority' => 4,
+                        'priority_label' => __('ai_member::messages.priority_routine'),
+                        'priority_class' => 'bg-info-subtle text-info',
+                        'scheduled_at' => $nextGrpPostTime,
+                        'status' => $now >= $nextGrpPostTime ? 'ready' : 'scheduled',
+                        'detail' => __('ai_member::messages.task_group_post_detail', ['time' => date('Y-m-d H:i:s', $nextGrpPostTime)]),
+                        'executable' => true,
+                    ];
+                }
             }
-            return $aOrder <=> $bOrder;
+        }
+
+        if (!empty($config['enable_reactions'])) {
+            $lastReactionTime = (int) Cache::get('ai_member_last_reaction', 0);
+            $nextReactionTime = $lastReactionTime + 7200;
+            $tasks[] = [
+                'key' => 'reaction',
+                'name' => __('ai_member::messages.task_reaction_name'),
+                'type' => 'scheduled',
+                'priority' => 4,
+                'priority_label' => __('ai_member::messages.priority_routine'),
+                'priority_class' => 'bg-info-subtle text-info',
+                'scheduled_at' => $nextReactionTime,
+                'status' => $now >= $nextReactionTime ? 'ready' : 'scheduled',
+                'detail' => __('ai_member::messages.task_reaction_detail', ['time' => date('Y-m-d H:i:s', $nextReactionTime)]),
+                'executable' => true,
+            ];
+        }
+
+        // Sort by priority (Urgent 1 -> Routine 4), then by scheduled_at
+        usort($tasks, static function ($a, $b) {
+            if ($a['priority'] !== $b['priority']) {
+                return $a['priority'] <=> $b['priority'];
+            }
+            return $a['scheduled_at'] <=> $b['scheduled_at'];
         });
+
+        // Add 1-based queue position indices (#1, #2...)
+        foreach ($tasks as $i => &$task) {
+            $task['queue_index'] = $i + 1;
+        }
+        unset($task);
 
         return $tasks;
     }
 
-    public function cancelTask($taskKey)
+    /**
+     * Cancel and permanently ignore a task.
+     */
+    public function cancelTask(string $taskKey): bool
     {
-        if (empty($taskKey)) return false;
+        if (empty($taskKey)) {
+            return false;
+        }
 
-        $bot = $this->getBotUser();
         $config = $this->getConfig();
+        $this->addIgnoredTask($taskKey);
 
         if ($taskKey === 'feed_post') {
             Cache::put('ai_member_last_post', time(), now()->addDays(30));
+            $this->logActivity('task_cancelled', 'Postponed feed auto-post');
             return true;
         }
 
         if ($taskKey === 'group_post') {
             if (!empty($config['managed_group_slug'])) {
-                $group = \App\Models\Group::where('slug', $config['managed_group_slug'])->first();
+                $group = Group::where('slug', $config['managed_group_slug'])->first();
                 if ($group) {
                     Cache::put('ai_member_last_grp_post_' . $group->id, time(), now()->addDays(30));
+                    $this->logActivity('task_cancelled', 'Postponed group auto-post');
                     return true;
                 }
             }
@@ -1447,49 +1722,61 @@ TEXT TO REVIEW:
 
         if ($taskKey === 'reaction') {
             Cache::put('ai_member_last_reaction', time(), now()->addDays(30));
+            $this->logActivity('task_cancelled', 'Postponed reaction trigger');
             return true;
         }
 
         if (str_starts_with($taskKey, 'message_')) {
             $msgId = (int) substr($taskKey, 8);
             Message::where('id_msg', $msgId)->update(['state' => 0]);
+            $this->logActivity('task_cancelled', 'Ignored private message #' . $msgId);
             return true;
         }
 
         if (str_starts_with($taskKey, 'mention_')) {
             $mentionId = (int) substr($taskKey, 8);
-            $ignored = Cache::get('ai_member_ignored_mentions', []);
+            $ignored = (array) Cache::get('ai_member_ignored_mentions', []);
             $ignored[] = $mentionId;
             Cache::put('ai_member_ignored_mentions', array_unique($ignored), now()->addDays(30));
+            $this->logActivity('task_cancelled', 'Ignored mention #' . $mentionId);
             return true;
         }
 
         if (str_starts_with($taskKey, 'comment_')) {
             $commentId = (int) substr($taskKey, 8);
-            $ignored = Cache::get('ai_member_ignored_comments', []);
+            $ignored = (array) Cache::get('ai_member_ignored_comments', []);
             $ignored[] = $commentId;
             Cache::put('ai_member_ignored_comments', array_unique($ignored), now()->addDays(30));
+            $this->logActivity('task_cancelled', 'Ignored comment #' . $commentId);
             return true;
         }
 
         if (str_starts_with($taskKey, 'group_comment_')) {
             $topicId = (int) substr($taskKey, 14);
-            $ignored = Cache::get('ai_member_ignored_group_topics', []);
+            $ignored = (array) Cache::get('ai_member_ignored_group_topics', []);
             $ignored[] = $topicId;
             Cache::put('ai_member_ignored_group_topics', array_unique($ignored), now()->addDays(30));
+            $this->logActivity('task_cancelled', 'Ignored group topic comment #' . $topicId);
             return true;
         }
 
-        return false;
+        return true;
     }
 
-    public function executeTask($taskKey)
+    /**
+     * Execute a task immediately on-demand.
+     */
+    public function executeTask(string $taskKey): bool
     {
-        if (empty($taskKey)) return false;
+        if (empty($taskKey)) {
+            return false;
+        }
 
         $bot = $this->getBotUser();
         $config = $this->getConfig();
-        if (!$bot) return false;
+        if (!$bot) {
+            return false;
+        }
 
         $globalCooldownKey = 'ai_member_global_cooldown';
 
@@ -1506,7 +1793,7 @@ TEXT TO REVIEW:
 
         if ($taskKey === 'group_post') {
             if (!empty($config['managed_group_slug'])) {
-                $group = \App\Models\Group::where('slug', $config['managed_group_slug'])->first();
+                $group = Group::where('slug', $config['managed_group_slug'])->first();
                 if ($group) {
                     $res = $this->generateGroupPost($bot, $config, $group);
                     if ($res) {
@@ -1549,7 +1836,7 @@ TEXT TO REVIEW:
 
         if (str_starts_with($taskKey, 'mention_')) {
             $mentionId = (int) substr($taskKey, 8);
-            $mention = \App\Models\StatusMention::find($mentionId);
+            $mention = StatusMention::find($mentionId);
             if ($mention) {
                 $res = $this->replyToMention($bot, $config, $mention);
                 if ($res) {
@@ -1579,7 +1866,7 @@ TEXT TO REVIEW:
 
         if (str_starts_with($taskKey, 'group_comment_')) {
             $topicId = (int) substr($taskKey, 14);
-            $topic = \App\Models\ForumTopic::find($topicId);
+            $topic = ForumTopic::find($topicId);
             if ($topic) {
                 $res = $this->commentOnGroupTopic($bot, $config, $topic);
                 if ($res) {
@@ -1593,5 +1880,143 @@ TEXT TO REVIEW:
         }
 
         return false;
+    }
+
+    /**
+     * Reset the global cooldown immediately via AJAX.
+     */
+    public function resetCooldown(): bool
+    {
+        Cache::forget('ai_member_global_cooldown');
+        $this->logActivity('cooldown_reset', 'Global cooldown manually reset by administrator');
+        return true;
+    }
+
+    /**
+     * Calculate remaining cooldown time in seconds.
+     */
+    public function getCooldownRemaining(): int
+    {
+        $config = $this->getConfig();
+        $cooldownMinutes = (int) ($config['cooldown_minutes'] ?? 5);
+        $lastActionTime = (int) Cache::get('ai_member_global_cooldown', 0);
+        $cooldownEnd = $lastActionTime + ($cooldownMinutes * 60);
+
+        return max(0, $cooldownEnd - time());
+    }
+
+    /**
+     * Compute next tick and action scheduled timestamps.
+     */
+    public function getNextTickTime(): array
+    {
+        $config = $this->getConfig();
+        $postFreqHours = (int) ($config['post_frequency_hours'] ?? 24);
+        $lastPostTime = (int) Cache::get('ai_member_last_post', 0);
+        $nextPost = $lastPostTime > 0 ? $lastPostTime + ($postFreqHours * 3600) : time();
+
+        return [
+            'next_post' => $nextPost,
+            'cooldown_remaining' => $this->getCooldownRemaining(),
+        ];
+    }
+
+    /**
+     * Record an event in the persistent activity log.
+     */
+    public function logActivity(string $action, string $description, string $status = 'success'): void
+    {
+        $logs = $this->getActivityLogs();
+        array_unshift($logs, [
+            'action' => $action,
+            'description' => $description,
+            'status' => $status,
+            'timestamp' => time(),
+            'formatted_time' => date('Y-m-d H:i:s'),
+        ]);
+
+        $logs = array_slice($logs, 0, 20);
+
+        Cache::put($this->activityLogsOption, $logs, now()->addDays(30));
+        Option::updateOrCreate(
+            ['name' => $this->activityLogsOption],
+            [
+                'o_valuer' => json_encode($logs),
+                'o_type' => 'ai_member',
+            ]
+        );
+    }
+
+    /**
+     * Retrieve the recent activity log records.
+     */
+    public function getActivityLogs(): array
+    {
+        $cached = Cache::get($this->activityLogsOption);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $option = Option::where('name', $this->activityLogsOption)->first();
+        if ($option) {
+            $logs = json_decode($option->o_valuer, true);
+            if (is_array($logs)) {
+                Cache::put($this->activityLogsOption, $logs, now()->addDays(30));
+                return $logs;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Clear all recorded activity logs.
+     */
+    public function clearActivityLogs(): bool
+    {
+        Cache::forget($this->activityLogsOption);
+        Option::where('name', $this->activityLogsOption)->delete();
+        return true;
+    }
+
+    /**
+     * Add task key to persistent ignore list.
+     */
+    private function addIgnoredTask(string $taskKey): void
+    {
+        $ignored = $this->getIgnoredTasks();
+        $ignored[] = $taskKey;
+        $ignored = array_values(array_unique($ignored));
+
+        Cache::put($this->ignoredTasksOption, $ignored, now()->addDays(30));
+        Option::updateOrCreate(
+            ['name' => $this->ignoredTasksOption],
+            [
+                'o_valuer' => json_encode($ignored),
+                'o_type' => 'ai_member',
+            ]
+        );
+    }
+
+    /**
+     * Retrieve the list of permanently ignored task keys.
+     */
+    private function getIgnoredTasks(): array
+    {
+        $cached = Cache::get($this->ignoredTasksOption);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $option = Option::where('name', $this->ignoredTasksOption)->first();
+        if ($option) {
+            $data = json_decode($option->o_valuer, true);
+            if (is_array($data)) {
+                Cache::put($this->ignoredTasksOption, $data, now()->addDays(30));
+                return $data;
+            }
+        }
+
+        return [];
     }
 }

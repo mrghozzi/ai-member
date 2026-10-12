@@ -2,6 +2,34 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.4.0] - 2026-10-12
+
+### Added
+- **Full Compatibility with MYADS v4.6.2 & v4.6.x Architecture:**
+  - **Threaded Nested Comments (`parent_id`)**: Bot comment replies on own posts and user interactions now populate `parent_id` linking directly to the parent comment, adhering to the MYADS v4.6.x threaded comments hierarchy.
+  - **Comment Reply Notifications**: Dispatches real-time notifications (`user_replied_to_your_comment`) to the author of the parent comment via `NotificationService` when the bot replies.
+  - **Bot Privacy & Anti-Enumeration (3-Tier Privacy Model)**: `syncBotUser()` automatically ensures `UserPrivacySetting` exists with `'public'` visibility and sets a secure `public_uid` hash on the bot user account.
+  - **Atomic Concurrency Locking**: Multi-process worker calls and client-triggered tick calls are protected by `Cache::lock('ai_member_tick_lock', 25)` preventing duplicate AI API requests and race conditions. Enforced single-action-per-tick execution.
+- **High-Speed AJAX Architecture & Interactive Experience:**
+  - **Instant AJAX Settings Save**: Settings form submits via AJAX with non-blocking feedback and animated floating success/error alerts without page reloading.
+  - **Interactive AJAX Task Queue**: "Run" (Execute Now) and "Cancel" (Ignore) actions execute in-place via AJAX with inline button loading spinners, toast alerts, and instant DOM replacement of the task queue without full-page reload.
+  - **Live Gemini AI Verification Console (`/admin/ai-member/test-ai`)**: Dedicated admin sandbox to verify Gemini API connectivity, test prompt completion, and measure API response latency in milliseconds directly from the settings panel.
+  - **Dynamic Google Gemini Model Loader (`/admin/ai-member/list-models`)**: Fetches supported models dynamically from Google Generative Language API with auto-selection of recommended models (`gemini-flash-latest`, `gemini-2.5-flash`, `gemini-2.5-pro`).
+  - **1-Click Cooldown Reset (`/admin/ai-member/reset-cooldown`)**: Instant AJAX button to clear global bot resting cooldown on-demand.
+  - **Live Activity History Log (`/admin/ai-member/clear-logs`)**: Rolling log of the last 20 actions completed by the bot with 1-click AJAX clear action.
+- **Prioritized Interaction Queue & Queue Indexing:**
+  - Upgraded `getPendingTasks()` with 4 priority tiers (Tier 1: Private Messages [Urgent], Tier 2: Mentions [High], Tier 3: Comments [Normal], Tier 4: Scheduled Background Triggers [Routine]), with `#1`, `#2`... queue position numbers and styled priority badges.
+  - **Permanent Task Dismissal (`cancelTask`)**: Cancelling a task in the admin dashboard persists the task key into DB `Option` (`ai_member_ignored_tasks`) and updates unread PM messages (`state = 0`) so dismissed interactions never re-appear in the queue.
+- **Client JS Tick Cooldown & Rate Limiting:**
+  - The public client tick injection now checks the server-side cooldown before rendering scripts, throttles browser triggers to 10 minutes via `localStorage`, backed by server-side `throttle:10,1` on the tick route.
+- **Duralux Dark Mode Support:**
+  - Full styling coverage for Duralux dark mode (`html.app-skin-dark`) across all settings cards, form controls, tables, and test panels.
+- **100% Arabic & English Bilingual Parity:**
+  - All new UI strings, priority badges, sandboxes, and tools are fully translated into Arabic and English.
+
+### Changed
+- **Platform Compatibility**: Updated compatibility in `plugin.json` to `min_myads: "4.6.0"` and `max_myads: "4.6.x"`.
+
 ## [1.3.2] - 2026-07-30
 
 ### Fixed
