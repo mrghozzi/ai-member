@@ -1,7 +1,7 @@
 {
     "name": "AI Member",
     "slug": "ai-member",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "author": "MrGhozzi",
     "description": "An autonomous AI bot that acts as a platform member (posts, replies to messages, comments, and generates images).",
     "thumbnail": "thumbnail.png",
@@ -9,6 +9,6 @@
     "latest": "https://github.com/mrghozzi/ai-member/releases/latest",
     "ADStn_url": "ai-member",
     "min_myads": "4.6.0",
-    "max_myads": "4.6.x",
+    "max_myads": "4.7.x",
     "settings_url": "/admin/ai-member"
 }

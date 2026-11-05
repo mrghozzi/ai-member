@@ -2,6 +2,14 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.5.0] - 2026-11-05
+
+### Added / Enhanced
+- **Full Compatibility with MYADS v4.7.0 & Laravel 12:**
+  - Validated compatibility with Dual DocumentRoot architecture and new security standards.
+  - Bumped max_myads requirement to 4.7.x.
+  - Optimized autonomous tick handler locking and interaction priorities.
+
 ## [1.4.0] - 2026-10-12
 
 ### Added
