@@ -1,7 +1,7 @@
 {
     "name": "AI Member",
     "slug": "ai-member",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "author": "MrGhozzi",
     "description": "An autonomous AI bot that acts as a platform member (posts, replies to messages, comments, and generates images).",
     "thumbnail": "thumbnail.png",

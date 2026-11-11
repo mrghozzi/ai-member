@@ -381,7 +381,20 @@
                             <div class="row g-4 mb-4">
                                 <div class="col-md-6">
                                     <label class="form-label fw-bold text-muted small text-uppercase mb-2">{{ __('ai_member::messages.group_managed_slug') }}</label>
-                                    <input type="text" name="managed_group_slug" class="form-control form-control-lg border-soft-light bg-light rounded-3" value="{{ $config['managed_group_slug'] ?? '' }}" placeholder="{{ __('ai_member::messages.group_managed_slug_placeholder') }}">
+                                    @php
+                                        $activeGroups = class_exists(\App\Models\Group::class) ? \App\Models\Group::where('status', \App\Models\Group::STATUS_ACTIVE)->orderBy('name')->get() : collect();
+                                    @endphp
+                                    <div class="input-group input-group-lg border-soft-light bg-light rounded-3 overflow-hidden">
+                                        <span class="input-group-text bg-transparent border-0 text-muted ps-3"><i class="feather-hash"></i></span>
+                                        <select name="managed_group_slug" class="form-select bg-transparent border-0 shadow-none ps-2">
+                                            <option value="">-- {{ __('ai_member::messages.no_group_selected') }} --</option>
+                                            @foreach($activeGroups as $grp)
+                                                <option value="{{ $grp->slug }}" {{ ($config['managed_group_slug'] ?? '') == $grp->slug ? 'selected' : '' }}>
+                                                    {{ $grp->name }} ({{ $grp->slug }}) [{{ \App\Models\Group::categoryLabel($grp->category) }}]
+                                                </option>
+                                            @endforeach
+                                        </select>
+                                    </div>
                                     <small class="text-muted mt-2 d-block"><i class="feather-info me-1"></i>{{ __('ai_member::messages.group_managed_slug_help') }}</small>
                                 </div>
                                 <div class="col-md-6">

@@ -1166,11 +1166,13 @@ THEIR COMMENT TO YOU:
     public function generateGroupPost(User $bot, array $config, Group $group): bool
     {
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
-        $rules = $config['group_rules'] ?? '';
+        $rules = !empty($config['group_rules']) ? $config['group_rules'] : ($group->rules_markdown ?? '');
+        $categoryLabel = class_exists(\App\Models\Group::class) ? \App\Models\Group::categoryLabel($group->category) : $group->category;
+        $groupDesc = Str::limit($group->short_description ?: $group->description ?: 'Community group discussions', 150);
 
         $systemPrompt = $persona . " 
-You are the owner and manager of a community group named \"{$group->name}\".
-Write an engaging topic (max 500 characters) for your group members.
+You are the owner and manager of a community group named \"{$group->name}\" (Category: {$categoryLabel}, Description: {$groupDesc}).
+Write an engaging topic (max 500 characters) for your group members matching the group's theme and purpose.
 Start a discussion, ask a question, or share an insight related to the group's theme.
 Do NOT use markdown.
 Group Rules for context: {$rules}";
@@ -1201,6 +1203,12 @@ Group Rules for context: {$rules}";
             $status->save();
 
             $group->increment('posts_count');
+            if (class_exists(\App\Services\GroupMembershipService::class)) {
+                app(\App\Services\GroupMembershipService::class)->touchActivity($group, $time);
+            } else {
+                $group->update(['last_activity_at' => now()]);
+            }
+
             $this->logActivity('group_post_created', 'Created topic in group: ' . $group->name);
             return true;
         }
@@ -1255,9 +1263,12 @@ Group Rules for context: {$rules}";
             return false;
         }
 
+        $group = $latestTopic->groupRecord ?: ($latestTopic->group_id ? Group::find($latestTopic->group_id) : null);
+        $groupName = $group ? $group->name : 'Community Group';
+
         $persona = $config['persona_prompt'] ?? 'You are a helpful member.';
         $systemPrompt = $persona . " 
-You are reading a post in your community group.
+You are reading a post in the community group \"{$groupName}\".
 Write a friendly, engaging comment in response to the post below.
 Do not use markdown.
 
@@ -1275,6 +1286,10 @@ POST TEXT:
             $reply->save();
 
             $latestTopic->increment('reply');
+
+            if ($group && class_exists(\App\Services\GroupMembershipService::class)) {
+                app(\App\Services\GroupMembershipService::class)->touchActivity($group);
+            }
 
             if (class_exists(NotificationService::class)) {
                 app(NotificationService::class)->send(
@@ -1299,7 +1314,7 @@ POST TEXT:
      */
     private function processGroupModeration(User $bot, array $config, Group $group): bool
     {
-        $rules = $config['group_rules'] ?? '';
+        $rules = !empty($config['group_rules']) ? $config['group_rules'] : ($group->rules_markdown ?? '');
         if (empty($rules)) {
             return false;
         }
@@ -1350,7 +1365,7 @@ POST TEXT:
         $text = strip_tags($contentObj->txt);
         $userId = $contentObj->uid;
 
-        $systemPrompt = "You are the strict moderator of a community group.
+        $systemPrompt = "You are the strict moderator of the community group '{$group->name}'.
 Here are the Group Rules:
 {$rules}
 
@@ -1358,8 +1373,9 @@ Review the following text submitted by a user.
 Does it violate the rules?
 Reply strictly with one of the following formats:
 [MOD_OK] - If the text is fine.
-[MOD_DELETE] reason - If it violates rules but doesn't warrant a kick.
-[MOD_KICK] reason - If it's a severe violation and the user should be kicked from the group.
+[MOD_DELETE] reason - If it violates rules but doesn't warrant a kick or ban.
+[MOD_KICK] reason - If it's a severe violation and the user should be removed from the group.
+[MOD_BAN] reason - If it's an extreme violation (severe hate speech, malicious scam, repeat offender) and the user should be permanently banned from the group.
 
 TEXT TO REVIEW:
 \"{$text}\"";
@@ -1371,17 +1387,45 @@ TEXT TO REVIEW:
                 $reason = trim($matches[1] ?? 'Violation of group rules');
                 if ($type === 'topic') {
                     $contentObj->delete();
-                    Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
+                    Status::where('tp_id', $contentObj->id)->delete();
                 } else {
                     $contentObj->delete();
                 }
-                $this->notifyUserOfModeration($bot, $userId, $group, $reason, false);
+                if (class_exists(\App\Services\GroupMembershipService::class)) {
+                    app(\App\Services\GroupMembershipService::class)->syncCounts($group);
+                }
+                $this->notifyUserOfModeration($bot, $userId, $group, $reason, 'delete');
                 $this->logActivity('group_moderated', 'Deleted violating ' . $type . ' in group ' . $group->name);
+            } elseif (preg_match('/\[MOD_BAN\](.*)/i', $response, $matches)) {
+                $reason = trim($matches[1] ?? 'Extreme violation of group rules');
+                if ($type === 'topic') {
+                    $contentObj->delete();
+                    Status::where('tp_id', $contentObj->id)->delete();
+                } else {
+                    $contentObj->delete();
+                }
+
+                $membership = GroupMembership::where('group_id', $group->id)
+                    ->where('user_id', $userId)
+                    ->first();
+                if ($membership) {
+                    if (class_exists(\App\Services\GroupMembershipService::class)) {
+                        app(\App\Services\GroupMembershipService::class)->ban($membership, $bot);
+                    } else {
+                        $membership->update(['status' => GroupMembership::STATUS_BANNED]);
+                    }
+                }
+                if (class_exists(\App\Services\GroupMembershipService::class)) {
+                    app(\App\Services\GroupMembershipService::class)->syncCounts($group);
+                }
+
+                $this->notifyUserOfModeration($bot, $userId, $group, $reason, 'ban');
+                $this->logActivity('group_moderated', 'Banned member UID ' . $userId . ' from group ' . $group->name);
             } elseif (preg_match('/\[MOD_KICK\](.*)/i', $response, $matches)) {
                 $reason = trim($matches[1] ?? 'Severe violation of group rules');
                 if ($type === 'topic') {
                     $contentObj->delete();
-                    Status::where('tp_id', $contentObj->id)->where('s_type', 100)->delete();
+                    Status::where('tp_id', $contentObj->id)->delete();
                 } else {
                     $contentObj->delete();
                 }
@@ -1389,8 +1433,11 @@ TEXT TO REVIEW:
                 GroupMembership::where('group_id', $group->id)
                     ->where('user_id', $userId)
                     ->delete();
+                if (class_exists(\App\Services\GroupMembershipService::class)) {
+                    app(\App\Services\GroupMembershipService::class)->syncCounts($group);
+                }
 
-                $this->notifyUserOfModeration($bot, $userId, $group, $reason, true);
+                $this->notifyUserOfModeration($bot, $userId, $group, $reason, 'kick');
                 $this->logActivity('group_moderated', 'Kicked member UID ' . $userId . ' from group ' . $group->name);
             }
         }
@@ -1399,12 +1446,16 @@ TEXT TO REVIEW:
     /**
      * Dispatch notification & PM to moderated user.
      */
-    private function notifyUserOfModeration(User $bot, int $userId, Group $group, string $reason, bool $isKick): void
+    private function notifyUserOfModeration(User $bot, int $userId, Group $group, string $reason, string $action): void
     {
         $groupName = $group->name;
 
         $pmTitle = __('ai_member::messages.mod_pm_title');
-        $pmBodyKey = $isKick ? 'ai_member::messages.mod_pm_kick_body' : 'ai_member::messages.mod_pm_delete_body';
+        $pmBodyKey = match($action) {
+            'ban' => 'ai_member::messages.mod_pm_ban_body',
+            'kick' => 'ai_member::messages.mod_pm_kick_body',
+            default => 'ai_member::messages.mod_pm_delete_body',
+        };
         $pmBody = __($pmBodyKey, ['group' => $groupName, 'reason' => $reason]);
         $pmFooter = __('ai_member::messages.mod_pm_footer');
         $pmText = "{$pmTitle}\n\n{$pmBody}\n\n{$pmFooter}";
@@ -1418,7 +1469,11 @@ TEXT TO REVIEW:
         $message->time = time();
         $message->save();
 
-        $notifKey = $isKick ? 'ai_member::messages.mod_notif_kick' : 'ai_member::messages.mod_notif_delete';
+        $notifKey = match($action) {
+            'ban' => 'ai_member::messages.mod_notif_ban',
+            'kick' => 'ai_member::messages.mod_notif_kick',
+            default => 'ai_member::messages.mod_notif_delete',
+        };
         $notifText = __($notifKey, ['group' => $groupName]);
 
         if (class_exists(NotificationService::class)) {

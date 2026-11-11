@@ -72,10 +72,13 @@ return [
     // Moderation Notifications
     'mod_notif_delete' => 'تم حذف محتوى لك في المجموعة :group',
     'mod_notif_kick' => 'تم طردك من المجموعة :group',
+    'mod_notif_ban' => 'تم حظرك من المجموعة :group',
     'mod_pm_title' => 'مرحباً،',
     'mod_pm_delete_body' => "لقد تم حذف محتوى لك في المجموعة ':group' للسبب التالي:\n\n:reason",
     'mod_pm_kick_body' => "لقد تم طردك من المجموعة ':group' للسبب التالي:\n\n:reason",
+    'mod_pm_ban_body' => "لقد تم حظرك من المجموعة ':group' لمخالفة جسيمة لقوانين المجموعة:\n\n:reason",
     'mod_pm_footer' => "---\n*يرجى عدم الرد على هذه الرسالة الآلية أو النقاش حول السبب. لأي استفسار، يرجى التواصل مع إدارة الموقع.*",
+    'no_group_selected' => 'اختر مجموعة (أو اترك الحقل فارغاً)',
 
     // Pending Tasks & Interaction Queue
     'pending_tasks_title' => 'طابور التفاعلات والمهام المعلقة',

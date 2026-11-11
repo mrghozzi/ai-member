@@ -72,10 +72,13 @@ return [
     // Moderation Notifications
     'mod_notif_delete' => 'Your content was deleted in the group :group',
     'mod_notif_kick' => 'You were kicked from the group :group',
+    'mod_notif_ban' => 'You have been banned from the group :group',
     'mod_pm_title' => 'Hello,',
     'mod_pm_delete_body' => "Your content in the group ':group' has been deleted for the following reason:\n\n:reason",
     'mod_pm_kick_body' => "You have been kicked from the group ':group' for the following reason:\n\n:reason",
+    'mod_pm_ban_body' => "You have been banned from the group ':group' for the following severe violation:\n\n:reason",
     'mod_pm_footer' => "---\n*Please do not reply to this automated message. For inquiries, contact the site administration.*",
+    'no_group_selected' => 'Select a Group (or leave empty)',
 
     // Pending Tasks & Interaction Queue
     'pending_tasks_title' => 'Interaction Queue & Pending Tasks',
